@@ -1,0 +1,37 @@
+# Name and general description of the program
+
+#---------------------- data segment ---------------------#
+
+    .data   # Data declarations go in this section
+
+#---------------------- text segment ---------------------#
+
+    .text            # Program code goes in this section
+    .globl main
+main:                # Execution starts here
+
+	li t1, 0x12345678 	#Φόρτωση της λέξης στον καταχωρητή
+	
+	andi t2, t1, 0xFF	#Απομόνωση του πρώτου byte
+	slli t2, t2, 24		#Μετακίνηση
+	
+	srli t3, t1, 8		#Ολίσθηση για απομόνωση του δεύτερου byte
+	andi t3, t3, 0xFF	#Απομόνωση του δεύτερου byte
+	slli t3, t3, 16		#Μετακίνηση
+	
+	srli t4, t1, 16		#Ολίσθηση για απομόνωση του τρίτου byte
+	andi t4, t4, 0xFF	#Απομόνωση του τρίτου byte
+	slli t4, t4, 8		#Μετακίνηση
+	
+	srli t5, t1, 24		#Ολίσθηση για απομόνωση του τέταρτου byte
+	andi t5, t5, 0xFF	#Απομόνωση του τέταρτου byte
+	
+	or t6, t2, t3		#Συγχώνευση
+	or t6, t6, t4
+	or t6, t6, t5		#Ο t6 θα περιέχει τη λέξη σε little endian	
+	
+    
+    li    a7, 10     # Done, terminate program
+    ecall            # au revoir...
+
+#----------------------- End of File ---------------------#

@@ -1,0 +1,28 @@
+# Hamming
+    .data
+a:  .word 0xffffffff
+b:  .word 0xffff00ff
+
+    .text            # Program code goes in this section
+    .globl main
+main:                # Execution starts here
+	
+	li t0, 32
+	li t5, 1
+	lw t1, a
+	lw t2, b 
+	li a0, 0
+	
+	xor t3, t1, t2		#t1 xor t2
+	
+	loop:
+	addi t0, t0, -1 	#Επανάληψη 32 φορές
+	beqz t0, end		
+	andi t4, t3, 0x00000001	#and με το 0x1 για να δω αν το LSB είναι 0 ή 1
+	srli t3, t3, 1
+	add a0, a0, t4		#Hamming++
+	j loop
+
+	end:
+ 	li    a7, 10     # Done, terminate program
+	ecall            # au revoir...

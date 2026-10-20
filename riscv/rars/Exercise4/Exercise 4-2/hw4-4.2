@@ -1,0 +1,16 @@
+ 	.data
+first:	.word 0xABCD8765
+second: .byte 0xAB, 0xCD, 0x87, 0x65
+	
+	.text		# Program code goes in this section.
+	.globl main
+main: 			# Execution starts here
+ 	la x5, first
+ 	lb x6, 1(x5)
+ 	lbu x7, 1(x5)
+ 	la x5, second
+ 	lb x8, 1(x5)
+ 	lbu x9, 1(x5)
+
+ 	li a7, 10 	# Done, terminate program.
+	ecall	 	# au revoir...

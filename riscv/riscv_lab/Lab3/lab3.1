@@ -1,0 +1,18 @@
+# Name and general description of the program
+
+#---------------------- data segment ---------------------#
+
+    .data   # Data declarations go in this section
+
+#---------------------- text segment ---------------------#
+
+    .text            # Program code goes in this section
+    .globl main
+main:                # Execution starts here
+
+	srli t0, a0, 1
+	xor a1, t0, a0
+	
+	li a7, 10
+	ecall
+	

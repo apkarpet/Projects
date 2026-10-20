@@ -1,0 +1,25 @@
+# Nested repository metadata is not part of the top-level Projects history.
+**/.git/
+**/.git.nested-backup/
+
+# C/C++ build products
+*.o
+*.obj
+*.a
+*.so
+*.dll
+*.exe
+*.out
+*.elf
+*.gch
+*.d
+
+# Python generated files
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Common local/editor files
+.DS_Store
+*.log

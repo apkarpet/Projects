@@ -1,0 +1,20 @@
+	#hw4-4.1
+
+	.data 
+A:	.word 2, 4, 1, 34, 7, 6, 42, 2, 4, 9, 5, 7
+
+	.text
+	.globl main
+	
+main:	
+	la x6, A		#x6 = starting adress of A
+	slli x7, x5, 2		#x7 = i*4
+	add x8, x6, x7		#x8 = &A[i]
+	
+	lw x9, 0(x8)		#x9 = A[i]
+	lw x10, 4(x8)		#x10 = A[i+1}
+	add x10, x9, x10	#x10 = A[i] + A[i+1}
+	sw x11, 8(x8)		#x11 = x10 (A[i+2] = A[i} + A[i+1])
+	
+	li a7, 10 		#terminate program
+	ecall

@@ -1,0 +1,31 @@
+# Name and general description of the program
+
+#---------------------- data segment ---------------------#
+
+    .data   # Data declarations go in this section
+ X: .word 0xffffff12
+
+#---------------------- text segment ---------------------#
+
+    .text            # Program code goes in this section
+    .globl main
+main:                # Execution starts here
+	    lw t1, X
+
+    	blt t1, x0, less	# X < 0 -> less
+    	bgt t1, x0, greater	# X > 0 -> greater
+    	li a0, 0
+    	j end
+    	
+less:	
+	li a0, -1
+	j end
+	
+greater:
+	li a0, 1
+	
+end:
+	li a7, 10     # Done, terminate program
+    	ecall         # au revoir...
+
+#----------------------- End of File ---------------------#

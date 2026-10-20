@@ -1,0 +1,3 @@
+Απαντήσεις Άσκησης 8.2
+
+α) lw t3, 0(t4) : PC_Inc:0x1, Wr_En:0x1, alu_op2_ctrl:IMM 

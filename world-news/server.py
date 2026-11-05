@@ -23,6 +23,8 @@ ROOT = os.path.dirname(os.path.abspath(__file__))
 STATIC = os.path.join(ROOT, "static")
 CONFIG_PATH = os.path.join(ROOT, "config.json")
 CACHE_DIR = os.path.join(os.environ.get("XDG_CACHE_HOME", os.path.expanduser("~/.cache")), "world-news")
+# Pre-lock projections are kept for good (not a cache) so each round can be scored later.
+TRACK_DIR = os.path.join(os.environ.get("XDG_DATA_HOME", os.path.expanduser("~/.local/share")), "world-news", "tracking")
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s", datefmt="%H:%M:%S")
 log = logging.getLogger("newsdesk")
@@ -83,7 +85,7 @@ def get_league(league, force=False):
 
 
 def cached_box(season, game):
-    return cache.get(f"box3:{season}:{game['id']}", float("inf"), lambda: fantasy.box_score(season, game))
+    return cache.get(f"box4:{season}:{game['id']}", float("inf"), lambda: fantasy.box_score(season, game))
 
 
 def get_fantasy(force=False):
@@ -149,13 +151,22 @@ def get_picks(rnd=None, force=False):
         lambda: picks.backtest(feiq["players"], logs, domestic["games"], games),
     )
     info = picks._team_info(games)
+    lock = picks.first_tip(games, rnd)
+    lists = picks.suggestions(rows)
+    if rnd == target and lock and time.time() < lock:
+        try:
+            picks.save_snapshot(TRACK_DIR, {"round": rnd, "players": rows, "lists": lists})
+        except OSError as e:
+            log.warning("could not save picks snapshot: %s", e)
     return {
         "round": rnd,
         "next_round": target,
         "rounds": [r for r in rounds if target <= r <= target + 2],
-        "lock": picks.first_tip(games, rnd),
+        "lock": lock,
         "players": rows,
-        "lists": picks.suggestions(rows),
+        "lists": lists,
+        "scoring": {"win_bonus": picks.WIN_BONUS, "slots": picks.SLOTS},
+        "track": picks.track_record(TRACK_DIR, logs, games),
         "coaches": picks.coach_rows(feiq["players"], games, rnd),
         "teams": info,
         "context": {"home_edge": round(ctx["home_edge"], 3), "rate": {k: round(v, 3) for k, v in ctx["rate"].items()}},
@@ -193,6 +204,14 @@ def get_meta():
             for sid, s in cfg["sections"].items()
         ],
     }
+
+
+def keep_picks_fresh():
+    """Recompute picks every 30 minutes so the saved pre-lock snapshot is
+    always close to the real lineup lock."""
+    while True:
+        time.sleep(30 * 60)
+        _quiet(get_picks)
 
 
 def warm_up():
@@ -310,6 +329,7 @@ def main():
     log.info("World News on http://localhost:%d", port)
     if not args.no_warmup:
         threading.Thread(target=warm_up, daemon=True).start()
+        threading.Thread(target=keep_picks_fresh, daemon=True).start()
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:

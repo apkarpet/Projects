@@ -4,7 +4,7 @@ A personal morning news site on `http://localhost:8420`. It has three sections:
 
 - **Work:** AI and models, big tech, chips and hardware, with Hacker News and Lobsters alongside.
 - **Sports:** EuroLeague, NBA and the Greek league, each with scores, standings and news, plus a **Fantasy** tab: the BasketNews injury report, top PIR per round and season PIR leaders. Injured players are flagged in the PIR lists.
-- **Picks** (under Sports): EuroLeague Fantasy Challenge suggestions for the next round. Every player gets a projected PIR, which is divided by his official price in credits. The page has top projected, best value, differentials and fades lists, coaches by win chance, a sortable table of every player (select one to see his recent games and the reasons behind his projection), and a backtest showing how accurate the model has been on past rounds.
+- **Picks** (under Sports): EuroLeague Fantasy Challenge suggestions for the next round, using the official scoring (PIR, +10% when the team wins, captain ×2). Every player gets expected fantasy points from projected minutes × PIR per minute × matchup × venue × injury status × win chance, which is divided by his official price. The page has captain picks, top projected, best value, differentials and fades lists, coaches by win chance, a sortable table of every player with reasons and team ratings, a backtest against simple baselines and a hindsight noise floor, and a live track record. Projections are saved before each lineup lock in `~/.local/share/world-news/tracking/` and scored after the round.
 - **Other:** world, US politics, economy, Greece and Europe, and science, with a markets panel.
 
 Stories published since your last visit get a dot, and links you have opened fade.

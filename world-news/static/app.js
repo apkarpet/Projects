@@ -91,7 +91,7 @@ const state = {
   perfRound: null,
   injFilter: store.get("wn.injFilter", "all"),
   picks: null,
-  pick: { round: null, sort: "proj", dir: -1, pos: "all", max: null, q: "", hideOut: true, open: null },
+  pick: { round: null, sort: "xfp", dir: -1, pos: "all", max: null, q: "", hideOut: true, open: null },
   injQuery: "",
   baseline: null,
   refreshing: false,
@@ -563,13 +563,13 @@ function statusFlag(r) {
 
 function pickLine(r, i, metric) {
   const fixture = `${r.home ? "vs" : "at"} ${esc(r.opp)}`;
-  const big = metric === "value" ? `${fmt(r.value, 2)}<small>PIR/cr</small>` : `${fmt(r.proj)}<small>proj</small>`;
+  const big = metric === "value" ? `${fmt(r.value, 2)}<small>pts/cr</small>` : `${fmt(r.xfp)}<small>exp pts</small>`;
   return `<div class="perf">
     <span class="rank">${i + 1}</span>
     <span class="who">${esc(r.name)}<span class="team-code">${esc(r.team)}</span>${statusFlag(r)}</span>
     <span class="pir">${big}</span>
-    <span class="line">${fixture}, ${fmt(r.price)} cr${metric === "pop" || metric === "fade" ? `, ${fmt(r.popularity)}% own` : ""}${
-      metric === "value" ? `, ${fmt(r.proj)} proj` : ""
+    <span class="line">${fixture}, ${fmt(r.price)} cr${metric === "pop" || metric === "fade" ? `, ${fmt(r.popularity)}% own` : `, ${r.win}% win`}${
+      metric === "value" ? `, ${fmt(r.xfp)} pts` : ""
     }</span>
   </div>`;
 }
@@ -612,7 +612,12 @@ function gameBars(r) {
 
 function pickDetail(r) {
   const reasons = r.reasons.length ? `<ul class="reasons">${r.reasons.map((x) => `<li>${esc(x)}</li>`).join("")}</ul>` : `<p class="pick-note">No special factors: a straight read of minutes, rate and matchup.</p>`;
+  const rank = (v, n) => (v == null ? "–" : `${fmt(v)} (${n}${n === 1 ? "st" : n === 2 ? "nd" : n === 3 ? "rd" : "th"})`);
   const facts = [
+    ["Expected fantasy pts", `${fmt(r.xfp)} (${fmt(r.proj)} PIR + win bonus)`],
+    ["Team win chance", `${r.win}%`],
+    ["His team's offence", rank(r.ortg, r.ortg_rank)],
+    [`${r.opp_name || r.opp} defence`, rank(r.opp_drtg, r.opp_drtg_rank)],
     ["Projected minutes", fmt(r.minutes)],
     ["PIR per minute", fmt(r.rate, 3)],
     ["Range (±1 sd)", `${fmt(r.floor)} to ${fmt(r.ceil)}`],
@@ -624,7 +629,8 @@ function pickDetail(r) {
   return `<div class="pick-detail">
     <div class="pd-chart"><h4>Last games</h4>${gameBars(r)}</div>
     <div class="pd-why"><h4>Why ${fmt(r.proj)}</h4>${reasons}
-      <dl class="facts">${facts.map(([k, v]) => `<div><dt>${k}</dt><dd>${v}</dd></div>`).join("")}</dl>
+      <dl class="facts">${facts.map(([k, v]) => `<div><dt>${esc(k)}</dt><dd>${v}</dd></div>`).join("")}</dl>
+      <p class="pick-note">Ratings are points per 100 possessions. Offence rank 1 scores most; defence rank 1 allows most, so it is the easiest to score against.</p>
     </div>
   </div>`;
 }
@@ -633,8 +639,10 @@ const PICK_COLS = [
   ["name", "Player", "l"],
   ["opp", "Next", "l"],
   ["price", "Price"],
-  ["proj", "Proj"],
-  ["value", "PIR/cr"],
+  ["xfp", "Exp. pts"],
+  ["proj", "PIR"],
+  ["value", "Pts/cr"],
+  ["win", "Win"],
   ["minutes", "Min"],
   ["season", "Season"],
   ["l3", "Last 3"],
@@ -677,8 +685,10 @@ function picksTable() {
         <td class="l"><span class="strong">${esc(r.name)}</span> <span class="muted">${esc(r.team)} ${r.pos}</span>${statusFlag(r)}</td>
         <td class="l muted">${r.home ? "vs" : "at"} ${esc(r.opp)}</td>
         <td>${fmt(r.price)}${chg}</td>
-        <td class="strong">${fmt(r.proj)}</td>
+        <td class="strong">${fmt(r.xfp)}</td>
+        <td>${fmt(r.proj)}</td>
         <td>${fmt(r.value, 2)}</td>
+        <td class="muted">${r.win}%</td>
         <td>${fmt(r.minutes)}</td>
         <td>${fmt(r.season)}</td>
         <td>${fmt(r.l3)}</td>
@@ -699,25 +709,55 @@ function picksTable() {
 function backtestPanel(bt) {
   if (!bt?.rounds?.length) return "";
   const s = bt.summary;
-  const better = s.model.mae < s.season.mae;
   const rows = bt.rounds
     .map(
-      (r) => `<tr><td class="l">Round ${r.round}</td><td class="strong">${fmt(r.model.mae, 2)}</td><td>${fmt(r.season.mae, 2)}</td><td>${fmt(r.last3.mae, 2)}</td><td class="strong">${fmt(
-        r.model.top20
-      )}</td><td>${fmt(r.season.top20)}</td><td>${fmt(r.last3.top20)}</td></tr>`
+      (r) => `<tr><td class="l">Round ${r.round}</td><td class="strong">${fmt(r.model.mae, 2)}</td><td>${fmt(r.season.mae, 2)}</td><td>${fmt(r.hindsight.mae, 2)}</td>
+      <td class="strong">${fmt(r.model.top10)}</td><td>${fmt(r.season.top10)}</td><td class="strong">${fmt(r.model.top20)}</td><td>${fmt(r.season.top20)}</td>
+      <td class="strong">${fmt(r.model.captain)}</td><td>${fmt(r.season.captain)}</td><td class="muted">${fmt(r.best_captain)}</td></tr>`
+    )
+    .join("");
+  const brier = s.win_brier != null ? ` Win chances score ${fmt(s.win_brier, 3)} on the Brier scale (0.25 is a coin flip, lower is better).` : "";
+  return `<section class="group">
+    <div class="group-head"><h2 class="group-title">How accurate is this?</h2></div>
+    <p class="prose">Each finished round was replayed using only what was known before tip-off. The model's top 10 went on to score
+    <strong>${fmt(s.model.top10)}</strong> fantasy points each and its top 20 <strong>${fmt(s.model.top20)}</strong>, against ${fmt(s.season.top10)} and ${fmt(s.season.top20)}
+    for picking by season average. Its captain choice averaged <strong>${fmt(s.model.captain)}</strong> points before the ×2 (the round's best player averaged ${fmt(s.best_captain)}).</p>
+    <p class="prose">Per player, the model misses by ${fmt(s.model.mae, 2)} PIR on average. A predictor allowed to see the future, using each player's average over all his other games this season, misses by ${fmt(
+      s.hindsight.mae,
+      2
+    )}, so most of what is left is single-game luck no model can see coming.${brier}</p>
+    <div class="tablewrap"><table class="table bt named">
+      <thead><tr><th class="l">Round</th><th>Miss</th><th>Season avg miss</th><th>Hindsight miss</th><th>Top 10</th><th>Season top 10</th><th>Top 20</th><th>Season top 20</th><th>Captain</th><th>Season captain</th><th>Best possible</th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table></div>
+    <p class="pick-note">Miss is the mean absolute error in PIR. Top 10, top 20 and captain are the actual fantasy points (PIR plus the 10% win bonus) of each method's highest projections. Injuries are not replayed here, so live picks should do a little better.</p>
+  </section>`;
+}
+
+function trackPanel(track) {
+  if (!track?.length) {
+    return `<section class="group"><div class="group-head"><h2 class="group-title">Live track record</h2></div>
+      <p class="prose">From this round on, the projections are saved just before each lineup lock and scored once the round is played, with the real injury news and prices of the day. Results appear here after the first tracked round finishes.</p></section>`;
+  }
+  const rows = track
+    .map((t) =>
+      t.pending
+        ? `<tr><td class="l">Round ${t.round}</td><td class="l muted" colspan="6">Saved ${dayStamp(t.saved_at)}. Scored once every game is played.</td></tr>`
+        : `<tr><td class="l">Round ${t.round}</td><td class="strong">${fmt(t.mae, 2)}</td><td>${fmt(t.season_mae, 2)}</td><td class="strong">${fmt(t.top20)}</td><td>${fmt(
+            t.season_top20
+          )}</td><td class="l">${esc(t.captain_name || "–")} <span class="strong">${fmt(t.captain)}</span> <span class="muted">of ${fmt(t.best_captain)}</span></td><td>${fmt(
+            t.value_per_credit,
+            2
+          )} <span class="muted">vs ${fmt(t.avg_per_credit, 2)}</span></td></tr>`
     )
     .join("");
   return `<section class="group">
-    <div class="group-head"><h2 class="group-title">How accurate is this?</h2></div>
-    <p class="prose">Each finished round was replayed using only what was known before tip-off, then compared with what actually happened.
-    The model's average miss is <strong>${fmt(s.model.mae, 2)} PIR</strong> per player, against ${fmt(s.season.mae, 2)} for simply using the season average
-    and ${fmt(s.last3.mae, 2)} for the last three games${better ? "" : ", so it is not yet beating the simple baseline"}. Its top 20 projected players went on to average
-    <strong>${fmt(s.model.top20)} PIR</strong>.${s.hindsight ? ` For scale: a predictor allowed to see the future, using each player's average over all his other games this season, misses by ${fmt(s.hindsight.mae, 2)}. Most of what is left is single-game luck that no model can see coming, so treat the range column seriously.` : " Single games are noisy: treat the range column seriously."}</p>
+    <div class="group-head"><h2 class="group-title">Live track record</h2></div>
+    <p class="prose">The real thing: projections saved just before each lineup lock, scored after the round.</p>
     <div class="tablewrap"><table class="table bt named">
-      <thead><tr><th class="l">Round</th><th>Model miss</th><th>Season avg miss</th><th>Last 3 miss</th><th>Model top 20</th><th>Season top 20</th><th>Last 3 top 20</th></tr></thead>
+      <thead><tr><th class="l">Round</th><th>Miss</th><th>Season avg miss</th><th>Top 20</th><th>Season top 20</th><th class="l">Captain pick</th><th>Value list pts/cr</th></tr></thead>
       <tbody>${rows}</tbody>
     </table></div>
-    <p class="pick-note">Miss is the mean absolute error in PIR. "Top 20" is the average actual PIR of each method's 20 highest projections. Injuries are not replayed, so live projections should do a little better.</p>
   </section>`;
 }
 
@@ -735,6 +775,25 @@ function coachPanel(coaches) {
     <div class="panel-head"><h2>Coaches</h2></div>
     <table class="table named"><thead><tr><th class="l">Coach</th><th class="l">Next</th><th>Price</th><th>Win</th><th>Owned</th></tr></thead><tbody>${rows}</tbody></table>
     <p class="panel-note">Coaches score on results, so they are ranked by win chance from this season's point margins plus home court.</p>
+  </section>`;
+}
+
+function captainStrip(keys, by) {
+  const rows = (keys || []).map((k) => by.get(k)).filter(Boolean);
+  if (!rows.length) return "";
+  return `<section class="captains">
+    <h3>Captain</h3>
+    <p class="pick-note">Captain points double, so these are the highest expected scorers with no injury doubt.</p>
+    <div class="cap-row">${rows
+      .map(
+        (r, i) => `<div class="cap">
+        <span class="cap-rank">${["First choice", "Second choice", "Third choice"][i]}</span>
+        <span class="cap-name">${esc(r.name)} <span class="team-code">${esc(r.team)}</span></span>
+        <span class="cap-pts">${fmt(r.xfp * 2)}<small> expected as captain</small></span>
+        <span class="cap-line">${r.home ? "vs" : "at"} ${esc(r.opp)}, ${r.win}% win, range ${fmt(r.floor)} to ${fmt(r.ceil)} PIR, ${fmt(r.price)} cr</span>
+      </div>`
+      )
+      .join("")}</div>
   </section>`;
 }
 
@@ -756,15 +815,18 @@ function renderPicks() {
     <div class="picks-head">
       <div>
         <h2 class="picks-title">Round ${P.round} picks</h2>
-        <p class="picks-sub">${P.round === P.next_round ? "Lineups lock" : "First tip-off"} ${esc(lock)}. Projected PIR for each player's next EuroLeague game, against his price in credits.</p>
+        <p class="picks-sub">${P.round === P.next_round ? "Lineups lock" : "First tip-off"} ${esc(lock)}. Expected fantasy points for each player's next EuroLeague game, against his price in credits.</p>
+        <p class="pick-note">Scoring: PIR, plus 10% when his team wins. Captain ×2, the other four starters and sixth man ×1, bench ×0.5. Coaches score on the result.</p>
       </div>
       ${roundSwitch}
     </div>
 
+    ${captainStrip(P.lists.captains, by)}
+
     <div class="pick-lists">
-      ${pickList("Top projected", "Most PIR expected, whatever the price.", P.lists.top, by, "proj")}
-      ${pickList("Best value", "Most projected PIR per credit (9+ PIR).", P.lists.value, by, "value")}
-      ${pickList("Differentials", "12+ PIR projected, owned by under 8% of managers.", P.lists.differentials, by, "pop")}
+      ${pickList("Top projected", "Most fantasy points expected, whatever the price.", P.lists.top, by, "proj")}
+      ${pickList("Best value", "Most expected points per credit (9+ points).", P.lists.value, by, "value")}
+      ${pickList("Differentials", "12+ points expected, owned by under 8% of managers.", P.lists.differentials, by, "pop")}
       ${pickList("Fades", "Popular picks that are out, doubtful or poor value this round.", P.lists.fades, by, "fade")}
     </div>
 
@@ -783,10 +845,10 @@ function renderPicks() {
     </section>
 
     <div class="layout picks-bottom">
-      <div class="main">${backtestPanel(P.backtest)}
+      <div class="main">${trackPanel(P.track)}${backtestPanel(P.backtest)}
         <section class="group">
           <div class="group-head"><h2 class="group-title">How the projection works</h2></div>
-          <p class="prose">Projected PIR = projected minutes × PIR per minute × matchup × home or away × availability.
+          <p class="prose">Projected PIR = projected minutes × PIR per minute × matchup × home or away × availability. Expected fantasy points add the 10% win bonus times his team's win chance, which comes from each team's average point margin this season plus home court.
           Minutes come from recent EuroLeague games (the latest count most), plus minutes inherited when a teammate in the rotation has just been ruled out.
           PIR per minute starts from last season's rate and is updated with every EuroLeague minute this season; domestic games count 30% as much.
           The result is scaled by 0.9 because PIR is lopsided: a few huge games pull the average above what a typical night looks like.

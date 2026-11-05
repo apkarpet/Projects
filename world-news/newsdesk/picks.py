@@ -31,8 +31,11 @@ from .fantasy import player_key
 from .net import fetch_text
 
 # Settings were tuned on rounds 4-7 and checked on rounds 8-9 (2026-27).
+# Team offensive/defensive rating, missing opposing defenders, a usage boost
+# for injured players' teammates and game pace were all tested the same way
+# and did not beat noise, so they stay at 0 (shown on the page as context).
 # Bump MODEL_VERSION whenever the model changes so the backtest reruns.
-MODEL_VERSION = 2
+MODEL_VERSION = 3
 
 FEIQ = "https://www.fantasyedgeiq.com"
 CET = ZoneInfo("Europe/Paris")
@@ -49,6 +52,18 @@ DVP_STRENGTH = 1.0  # how much of the opponent's position effect to apply
 DVP_SHRINK = 4  # games of evidence before trusting it halfway
 DVP_STAT = "pir"  # which stat "allowed by position" is measured in: pir or pts
 PACE_STRENGTH = 0.0  # how much of the expected game pace to apply
+DRTG_STRENGTH = 0.0  # opponent's defensive rating (points allowed per 100 possessions)
+ORTG_STRENGTH = 0.0  # own team's offensive rating
+MISSING_DEF_STRENGTH = 0.0  # boost when the opponent is missing rotation players
+MISSING_DEF_WEIGHTED = True  # weight missing players by their defensive activity
+USAGE_BOOST = 0.0  # teammates' PIR per minute rises with the share of team production that is out
+SAME_POS_SHARE = 0.55  # share of an injured player's minutes going to his position
+ROTATION_SHARE = 0.2  # share spread across the whole rotation
+WIN_BONUS = 0.10  # official game: +10% PIR when the player's team wins
+SLOTS = {"captain": 2.0, "starter": 1.0, "sixth": 1.0, "bench": 0.5}  # official multipliers
+HOME_EDGE_POINTS = 3.0  # home court in points, for win chances
+MARGIN_SD = 11.0  # spread of final margins around the expected one
+RATING_SHRINK = 3  # games before a team's net rating is trusted halfway
 CALIBRATION = 0.9  # overall scale; PIR is right-skewed, so the MAE-optimal value is a bit below 1
 
 
@@ -232,12 +247,56 @@ def _league_context(logs, posmap):
     for r in logs:
         poss[r["team"]][r["game"]] += r.get("fga", 0) - r.get("oreb", 0) + r.get("tov", 0) + 0.44 * r.get("fta", 0)
     pace = {t: statistics.mean(g.values()) for t, g in poss.items() if g}
+    # offensive / defensive rating: points per 100 possessions, for and against
+    pts = defaultdict(lambda: defaultdict(float))
+    game_teams = defaultdict(set)
+    for r in logs:
+        pts[r["team"]][r["game"]] += r["pts"]
+        game_teams[r["game"]].add(r["team"])
+    ortg, drtg = {}, {}
+    for t, games_ in poss.items():
+        p_for = sum(pts[t].values())
+        n_for = sum(games_.values())
+        p_against = n_against = 0.0
+        for gid in games_:
+            for o in game_teams[gid] - {t}:
+                p_against += pts[o][gid]
+                n_against += poss[o][gid]
+        if n_for and n_against:
+            ortg[t] = 100 * p_for / n_for
+            drtg[t] = 100 * p_against / n_against
+    league_rtg = statistics.mean(ortg.values()) if ortg else 100.0
+    # defensive activity per minute by position: steals, blocks, defensive rebounds
+    dmin, dact = defaultdict(float), defaultdict(float)
+    for r in logs:
+        pos = posmap.get(r["key"]) or r.get("pos") or "F"
+        dmin[pos] += r["min"]
+        dact[pos] += r.get("stl", 0) + r.get("blk", 0) + 0.5 * (r.get("reb", 0) - r.get("oreb", 0))
+    def_rate = {p: dact[p] / dmin[p] for p in dmin if dmin[p]}
+    # rank 1 = best offence / most generous defence (easiest to score against)
+    ortg_rank = {t: i for i, t in enumerate(sorted(ortg, key=lambda t: -ortg[t]), 1)}
+    drtg_rank = {t: i for i, t in enumerate(sorted(drtg, key=lambda t: -drtg[t]), 1)}
     pace_n = {t: len(g) for t, g in poss.items()}
     league_pace = statistics.mean(pace.values()) if pace else 1.0
     return {
         "rate": rate, "home_edge": edge, "dvp": dvp, "dvp_rank": ranks, "teams": len(dvp),
         "pace": pace, "pace_n": pace_n, "league_pace": league_pace,
+        "ortg": ortg, "drtg": drtg, "league_rtg": league_rtg, "def_rate": def_rate,
+        "ortg_rank": ortg_rank, "drtg_rank": drtg_rank,
     }
+
+
+def rating_factor(ctx, team, opp):
+    """Own offence and opponent defence relative to league average."""
+    f = 1.0
+    lr = ctx["league_rtg"]
+    if DRTG_STRENGTH and opp in ctx["drtg"]:
+        n = ctx["pace_n"].get(opp, 0)
+        f *= 1 + DRTG_STRENGTH * (ctx["drtg"][opp] / lr - 1) * n / (n + 4)
+    if ORTG_STRENGTH and team in ctx["ortg"]:
+        n = ctx["pace_n"].get(team, 0)
+        f *= 1 + ORTG_STRENGTH * (ctx["ortg"][team] / lr - 1) * n / (n + 4)
+    return f
 
 
 def pace_factor(ctx, team, opp):
@@ -275,6 +334,7 @@ def project(players, logs, domestic, games, rnd, cutoff, injuries=None):
     ctx = _league_context(logs, posmap)
     fixtures = _round_games(games, rnd)
     injuries = injuries or {}
+    ratings = team_ratings(games, cutoff)
 
     by_key = defaultdict(list)
     for r in logs:
@@ -351,6 +411,7 @@ def project(players, logs, domestic, games, rnd, cutoff, injuries=None):
         dvp, dvp_games = ctx["dvp"].get(opp["code"], {}).get(p["pos"], (1.0, 0))
         venue = ctx["home_edge"] if is_home else 1 / ctx["home_edge"]
         pace = pace_factor(ctx, p["team"], opp["code"])
+        ratings_f = rating_factor(ctx, p["team"], opp["code"])
 
         # --- availability
         inj = injuries.get(p["key"])
@@ -376,6 +437,7 @@ def project(players, logs, domestic, games, rnd, cutoff, injuries=None):
                 "dvp_games": dvp_games,
                 "venue": venue,
                 "pace": pace,
+                "ratings_f": ratings_f,
                 "avail": avail,
                 "inj": inj,
                 "missed": missed,
@@ -400,7 +462,7 @@ def project(players, logs, domestic, games, rnd, cutoff, injuries=None):
         for gone in newly_out:
             freed = gone["minutes"] * (1 - gone["avail"])
             same = [r for r in healthy if r["p"]["pos"] == gone["p"]["pos"]]
-            pools = ((same, 0.55), (healthy, 0.2))
+            pools = ((same, SAME_POS_SHARE), (healthy, ROTATION_SHARE))
             for pool, share in pools:
                 tot = sum(r["minutes"] for r in pool)
                 if not tot:
@@ -411,11 +473,55 @@ def project(players, logs, domestic, games, rnd, cutoff, injuries=None):
                     r["minutes"] += extra
                     r["vacated"].append((gone["p"]["name"], extra))
 
+    # production the team just lost, as a share of what it usually produces
+    lost_share = {}
+    for team, members in by_team.items():
+        team_logs = [x for x in logs if x["team"] == team]
+        n_games = len({x["game"] for x in team_logs})
+        if not n_games:
+            continue
+        team_pir = sum(x["pir"] for x in team_logs) / n_games
+        last_game = team_games.get(team, [None])[-1] if team_games.get(team) else None
+        lost = 0.0
+        for r in members:
+            if r["avail"] <= 0.4 and r["el"] and last_game is not None and r["el"][-1]["ts"] >= last_game:
+                recent = r["el"][-6:]
+                lost += max(0.0, statistics.mean(x["pir"] for x in recent)) * (1 - r["avail"])
+        if team_pir > 0:
+            lost_share[team] = min(0.5, lost / team_pir)
+
+    # opponents missing rotation players (just ruled out) defend worse
+    missing = defaultdict(float)
+    missing_names = defaultdict(list)
+    for team, members in by_team.items():
+        last_game = team_games.get(team, [None])[-1] if team_games.get(team) else None
+        for r in members:
+            if r["avail"] > 0.4 or not r["el"] or last_game is None or r["el"][-1]["ts"] < last_game:
+                continue
+            el_ = r["el"][-6:]
+            mins_ = sum(x["min"] for x in el_)
+            if not mins_ or mins_ / len(el_) < 12:
+                continue
+            weight = 1.0
+            if MISSING_DEF_WEIGHTED:
+                act = sum(x.get("stl", 0) + x.get("blk", 0) + 0.5 * (x.get("reb", 0) - x.get("oreb", 0)) for x in el_) / mins_
+                base = ctx["def_rate"].get(r["p"]["pos"]) or act or 1
+                weight = act / base if base else 1.0
+            missing[team] += (mins_ / len(el_)) / 200 * weight * (1 - r["avail"])
+            missing_names[team].append(r["p"]["name"])
+
     out = []
     for r in rows:
         p = r["p"]
         minutes = min(r["minutes"], 34.0)
-        proj = minutes * r["rate"] * r["dvp"] * r["venue"] * r["pace"] * r["avail"] * CALIBRATION
+        r["usage_f"] = 1 + USAGE_BOOST * lost_share.get(p["team"], 0.0) if r["avail"] > 0.4 else 1.0
+        if USAGE_BOOST and lost_share.get(p["team"], 0) >= 0.1 and r["avail"] > 0.4 and r["minutes"] >= 10:
+            r["reasons"].append(f"{round(lost_share[p['team']] * 100)}% of his team's usual PIR is sidelined, so more shots and touches")
+        opp_missing = missing.get(r["opp"]["code"], 0.0)
+        r["missing_f"] = 1 + MISSING_DEF_STRENGTH * opp_missing
+        if MISSING_DEF_STRENGTH and opp_missing >= 0.05:
+            r["reasons"].append(f"{r['opp']['name']} are without {', '.join(missing_names[r['opp']['code']])}")
+        proj = minutes * r["rate"] * r["dvp"] * r["venue"] * r["pace"] * r["ratings_f"] * r["missing_f"] * r["usage_f"] * r["avail"] * CALIBRATION
         el = r["el"]
         pirs = [x["pir"] for x in el]
         season = statistics.mean(pirs) if pirs else None
@@ -432,7 +538,6 @@ def project(players, logs, domestic, games, rnd, cutoff, injuries=None):
         reasons = list(r["reasons"])
         gained = sum(x for _, x in r["vacated"])
         if gained >= 0.8:
-            names = ", ".join(sorted({n for n, _ in r["vacated"]}))
             names = ", ".join(sorted({n for n, x in r["vacated"] if x > 0.1}))
             reasons.append(f"+{gained:.1f} min with {names} out")
         if r["dvp"] >= 1.04:
@@ -452,6 +557,8 @@ def project(players, logs, domestic, games, rnd, cutoff, injuries=None):
                 reasons.append(f"Strong in the domestic league lately ({dpir:.1f} PIR)")
 
         price = p["price"] or 0
+        win, _ = win_prob(ratings, p["team"], r["opp"]["code"], r["home"])
+        xfp = proj * (1 + WIN_BONUS * win)
         out.append(
             {
                 "name": p["name"],
@@ -469,7 +576,9 @@ def project(players, logs, domestic, games, rnd, cutoff, injuries=None):
                 "proj": round(proj, 1),
                 "floor": round(max(0.0, proj - sd), 1),
                 "ceil": round(proj + sd, 1),
-                "value": round(proj / price, 2) if price else None,
+                "win": round(win * 100),
+                "xfp": round(xfp, 1),
+                "value": round(xfp / price, 2) if price else None,
                 "minutes": round(minutes * r["avail"], 1),
                 "rate": round(r["rate"], 3),
                 "season": round(season, 1) if season is not None else None,
@@ -486,6 +595,10 @@ def project(players, logs, domestic, games, rnd, cutoff, injuries=None):
                 "dvp_rank": ctx["dvp_rank"].get((r["opp"]["code"], p["pos"])),
                 "venue": round(r["venue"], 3),
                 "pace": round(r["pace"], 3),
+                "ortg": round(ctx["ortg"][p["team"]], 1) if p["team"] in ctx["ortg"] else None,
+                "ortg_rank": ctx["ortg_rank"].get(p["team"]),
+                "opp_drtg": round(ctx["drtg"][r["opp"]["code"]], 1) if r["opp"]["code"] in ctx["drtg"] else None,
+                "opp_drtg_rank": ctx["drtg_rank"].get(r["opp"]["code"]),
                 "status": r["inj"]["status"] if r["inj"] else ("Injured" if p["injured_flag"] else None),
                 "severity": r["inj"]["severity"] if r["inj"] else (2 if p["injured_flag"] else None),
                 "feiq_proj": p["feiq_proj"],
@@ -508,25 +621,32 @@ def project(players, logs, domestic, games, rnd, cutoff, injuries=None):
 POS_WORD = {"G": "guards", "F": "forwards", "C": "centers"}
 
 
-# ---------------------------------------------------------------- coaches
+# ---------------------------------------------------------------- win chances
 
 
-def coach_rows(players, games, rnd):
-    """Coaches score on results, so rank them by win chance from net rating."""
+def team_ratings(games, cutoff=float("inf")):
+    """Average point margin per team from finished games before cutoff,
+    shrunk towards zero while the sample is small."""
     net = defaultdict(lambda: [0.0, 0])
     for g in games:
-        if g["state"] != "post":
+        if g["state"] != "post" or g["ts"] >= cutoff:
             continue
         d = g["home"]["score"] - g["away"]["score"]
         net[g["home"]["code"]][0] += d
         net[g["home"]["code"]][1] += 1
         net[g["away"]["code"]][0] -= d
         net[g["away"]["code"]][1] += 1
+    return {t: tot / (n + RATING_SHRINK) for t, (tot, n) in net.items()}
 
-    def rating(t):
-        tot, n = net[t]
-        return (tot / n) * n / (n + 3) if n else 0.0
 
+def win_prob(ratings, team, opp, home):
+    spread = ratings.get(team, 0.0) - ratings.get(opp, 0.0) + (HOME_EDGE_POINTS if home else -HOME_EDGE_POINTS)
+    return 0.5 * (1 + math.erf(spread / (MARGIN_SD * math.sqrt(2)))), spread
+
+
+def coach_rows(players, games, rnd):
+    """Coaches score on results, so rank them by win chance."""
+    ratings = team_ratings(games)
     fixtures = _round_games(games, rnd)
     out = []
     for p in players:
@@ -534,8 +654,7 @@ def coach_rows(players, games, rnd):
             continue
         g, home = fixtures[p["team"]]
         opp = g["away"] if home else g["home"]
-        spread = rating(p["team"]) - rating(opp["code"]) + (3.0 if home else -3.0)
-        win = 0.5 * (1 + math.erf(spread / (11 * math.sqrt(2))))
+        win, spread = win_prob(ratings, p["team"], opp["code"], home)
         out.append(
             {
                 "name": p["name"],
@@ -556,15 +675,20 @@ def coach_rows(players, games, rnd):
 
 
 def suggestions(rows):
-    able = [r for r in rows if (r["severity"] is None or r["severity"] >= 2) and r["proj"] > 0]
-    by_proj = sorted(able, key=lambda r: -r["proj"])
-    values = sorted((r["value"] for r in able if r["value"] and r["proj"] >= 6), reverse=True)
+    """Short lists, all ranked by expected fantasy points (PIR plus the
+    expected win bonus)."""
+    able = [r for r in rows if (r["severity"] is None or r["severity"] >= 2) and r["xfp"] > 0]
+    sure = [r for r in able if r["severity"] is None or r["severity"] >= 3]
+    by_xfp = sorted(able, key=lambda r: -r["xfp"])
+    values = sorted((r["value"] for r in able if r["value"] and r["xfp"] >= 6), reverse=True)
     median_value = statistics.median(values) if values else 1.0
     pick = lambda rs, n=10: [r["key"] + "|" + r["team"] for r in rs[:n]]
     return {
-        "top": pick(by_proj),
-        "value": pick(sorted([r for r in able if r["proj"] >= 9], key=lambda r: -(r["value"] or 0))),
-        "differentials": pick([r for r in by_proj if r["popularity"] < 8 and r["proj"] >= 12]),
+        # captain points double, so only players with no injury doubt
+        "captains": pick(sorted(sure, key=lambda r: -r["xfp"]), 3),
+        "top": pick(by_xfp),
+        "value": pick(sorted([r for r in able if r["xfp"] >= 9], key=lambda r: -(r["value"] or 0))),
+        "differentials": pick([r for r in by_xfp if r["popularity"] < 8 and r["xfp"] >= 12]),
         "fades": pick(
             sorted(
                 [
@@ -583,61 +707,178 @@ def suggestions(rows):
 # ---------------------------------------------------------------- backtest
 
 
+def _winners(games):
+    """(game id, team code) -> True if that team won."""
+    won = {}
+    for g in games:
+        if g["state"] == "post" and g.get("winner"):
+            w = g["winner"]
+            won[(g["id"], g["home"]["code"])] = w == "home"
+            won[(g["id"], g["away"]["code"])] = w == "away"
+    return won
+
+
+def fantasy_points(log_row, won):
+    return log_row["pir"] * (1 + WIN_BONUS * won.get((log_row["game"], log_row["team"]), False))
+
+
+def score_round(pred, actual):
+    """pred: list of dicts with key, team, proj, xfp (and baselines).
+    actual: {(key, team): {"pir": .., "fp": ..}}. Ranks are judged in fantasy points."""
+    pairs = [(r, actual[(r["key"], r["team"])]) for r in pred if (r["key"], r["team"]) in actual]
+    if not pairs:
+        return None
+
+    def top(metric, n):
+        best = sorted(pairs, key=lambda x: -(x[0].get(metric) or 0))[:n]
+        return round(statistics.mean(a["fp"] for _, a in best), 2)
+
+    return pairs, top
+
+
 def backtest(players, logs, domestic, games, min_round=4):
-    """Replay the model on finished rounds using only earlier data, and
-    compare it to two simple baselines: season average and last-3 average."""
+    """Replay the model on finished rounds using only earlier data. Average
+    miss is measured in PIR; pick quality in official fantasy points (PIR
+    plus the 10% win bonus)."""
     rounds = sorted({g["round"] for g in games if g["state"] == "post"})
     done = [r for r in rounds if all(g["state"] == "post" for g in games if g["round"] == r)]
-    results = []
+    won = _winners(games)
+    results, briers = [], []
     for rnd in done:
         if rnd < min_round:
             continue
         cutoff = first_tip(games, rnd)
         rows, _ = project(players, logs, domestic, games, rnd, cutoff)
-        actual = {(r["key"], r["team"]): r["pir"] for r in logs if r["round"] == rnd}
+        actual = {(r["key"], r["team"]): {"pir": r["pir"], "fp": fantasy_points(r, won)} for r in logs if r["round"] == rnd}
         others = defaultdict(list)  # every other game of the season, past and future
         for r in logs:
             if r["round"] != rnd:
                 others[(r["key"], r["team"])].append(r["pir"])
-        pairs = []
-        for r in rows:
-            ident = (r["key"], r["team"])
-            a = actual.get(ident)
-            if a is None or r["season"] is None or not others.get(ident):
-                continue
-            pairs.append((r["proj"], r["season"], r["l3"], a, statistics.mean(others[ident])))
-        if len(pairs) < 30:
+        pred = [
+            {**r, "hindsight": statistics.mean(others[(r["key"], r["team"])])}
+            for r in rows
+            if r["season"] is not None and others.get((r["key"], r["team"]))
+        ]
+        scored = score_round(pred, actual)
+        if not scored or len(scored[0]) < 30:
             continue
+        pairs, top = scored
 
-        def mae(i):
-            return statistics.mean(abs(x[i] - x[3]) for x in pairs)
+        def mae(metric):
+            return round(statistics.mean(abs(r[metric] - a["pir"]) for r, a in pairs), 2)
 
-        def corr(i):
-            xs, ys = [x[i] for x in pairs], [x[3] for x in pairs]
+        def corr(metric):
             try:
-                return statistics.correlation(xs, ys)
+                return round(statistics.correlation([r[metric] for r, _ in pairs], [a["fp"] for _, a in pairs], method="ranked"), 3)
             except statistics.StatisticsError:
                 return 0.0
 
-        def top_actual(i, n=20):
-            best = sorted(pairs, key=lambda x: -x[i])[:n]
-            return statistics.mean(x[3] for x in best)
-
-        results.append(
-            {
-                "round": rnd,
-                "players": len(pairs),
-                "hindsight": {"mae": round(statistics.mean(abs(x[4] - x[3]) for x in pairs), 2)},
-                "model": {"mae": round(mae(0), 2), "corr": round(corr(0), 3), "top20": round(top_actual(0), 1)},
-                "season": {"mae": round(mae(1), 2), "corr": round(corr(1), 3), "top20": round(top_actual(1), 1)},
-                "last3": {"mae": round(mae(2), 2), "corr": round(corr(2), 3), "top20": round(top_actual(2), 1)},
+        entry = {"round": rnd, "players": len(pairs), "best_captain": round(max(a["fp"] for _, a in pairs), 1)}
+        for name, metric in (("model", "proj"), ("season", "season"), ("last3", "l3")):
+            rank_metric = "xfp" if name == "model" else metric
+            entry[name] = {
+                "mae": mae(metric),
+                "corr": corr(rank_metric),
+                "top10": top(rank_metric, 10),
+                "top20": top(rank_metric, 20),
+                "captain": top(rank_metric, 1),
             }
-        )
+        entry["hindsight"] = {"mae": mae("hindsight")}
+        results.append(entry)
+
+        ratings = team_ratings(games, cutoff)
+        for g in games:
+            if g["round"] == rnd and g["state"] == "post":
+                p, _ = win_prob(ratings, g["home"]["code"], g["away"]["code"], True)
+                briers.append((p - (g["winner"] == "home")) ** 2)
+
     summary = {}
     if results:
         for k in ("model", "season", "last3"):
             summary[k] = {
-                m: round(statistics.mean(r[k][m] for r in results), 3 if m == "corr" else 2) for m in ("mae", "corr", "top20")
+                m: round(statistics.mean(r[k][m] for r in results), 3 if m == "corr" else 2)
+                for m in ("mae", "corr", "top10", "top20", "captain")
             }
         summary["hindsight"] = {"mae": round(statistics.mean(r["hindsight"]["mae"] for r in results), 2)}
+        summary["best_captain"] = round(statistics.mean(r["best_captain"] for r in results), 1)
+    if briers:
+        summary["win_brier"] = round(statistics.mean(briers), 3)
     return {"rounds": results, "summary": summary}
+
+
+# ---------------------------------------------------------------- live tracking
+
+
+def save_snapshot(directory, payload):
+    """Keep the latest pre-lock projections for a round so they can be
+    scored once the round is played."""
+    import os
+
+    os.makedirs(directory, exist_ok=True)
+    snap = {
+        "round": payload["round"],
+        "saved_at": time.time(),
+        "model_version": MODEL_VERSION,
+        "lists": payload["lists"],
+        "players": [
+            {k: r[k] for k in ("key", "team", "name", "proj", "xfp", "price", "popularity", "value", "season", "l3")}
+            for r in payload["players"]
+        ],
+    }
+    path = os.path.join(directory, f"round-{payload['round']:02d}.json")
+    tmp = path + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(snap, f)
+    os.replace(tmp, path)
+
+
+def track_record(directory, logs, games):
+    """Score every saved snapshot whose round is finished."""
+    import glob
+    import os
+
+    won = _winners(games)
+    out = []
+    for path in sorted(glob.glob(os.path.join(directory, "round-*.json"))):
+        try:
+            with open(path) as f:
+                snap = json.load(f)
+        except (OSError, ValueError):
+            continue
+        rnd = snap["round"]
+        rgames = [g for g in games if g["round"] == rnd]
+        if not rgames or any(g["state"] != "post" for g in rgames):
+            out.append({"round": rnd, "saved_at": snap["saved_at"], "pending": True})
+            continue
+        actual = {(r["key"], r["team"]): {"pir": r["pir"], "fp": fantasy_points(r, won)} for r in logs if r["round"] == rnd}
+        scored = score_round(snap["players"], actual)
+        if not scored:
+            continue
+        pairs, top = scored
+        by = {(r["key"], r["team"]): r for r in snap["players"]}
+
+        def listed(name):
+            keys = [tuple(k.split("|")) for k in snap["lists"].get(name, [])]
+            got = [(by[k], actual[k]) for k in keys if k in by and k in actual]
+            return got
+
+        value = listed("value")
+        caps = listed("captains")
+        out.append(
+            {
+                "round": rnd,
+                "saved_at": snap["saved_at"],
+                "pending": False,
+                "players": len(pairs),
+                "mae": round(statistics.mean(abs(r["proj"] - a["pir"]) for r, a in pairs), 2),
+                "season_mae": round(statistics.mean(abs((r["season"] or 0) - a["pir"]) for r, a in pairs), 2),
+                "top20": top("xfp", 20),
+                "season_top20": top("season", 20),
+                "captain": caps[0][1]["fp"] if caps else None,
+                "captain_name": caps[0][0]["name"] if caps else None,
+                "best_captain": round(max(a["fp"] for _, a in pairs), 1),
+                "value_per_credit": round(sum(a["fp"] for _, a in value) / sum(r["price"] for r, _ in value), 2) if value else None,
+                "avg_per_credit": round(sum(a["fp"] for _, a in pairs) / sum(r["price"] for r, _ in pairs), 2),
+            }
+        )
+    return out

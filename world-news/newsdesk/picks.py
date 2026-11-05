@@ -657,11 +657,13 @@ def coach_rows(players, games, rnd):
         win, spread = win_prob(ratings, p["team"], opp["code"], home)
         out.append(
             {
+                "key": p["key"],
                 "name": p["name"],
                 "team": p["team"],
                 "price": p["price"],
                 "popularity": p["popularity"],
                 "opp": opp["code"],
+                "tip": g["ts"],
                 "home": home,
                 "win": round(win * 100),
                 "spread": round(spread, 1),
@@ -882,3 +884,94 @@ def track_record(directory, logs, games):
             }
         )
     return out
+
+
+# ---------------------------------------------------------------- my team
+
+ROSTER = {"G": 4, "F": 4, "C": 2, "HC": 1}
+HORIZON_WEIGHTS = (1.0, 0.6, 0.4)  # this round, next round, the one after
+
+
+def lineup_value(points):
+    """Best lineup score for ten players' expected points: the top scorer
+    captains (x2), the next five are starters and sixth man (x1) and the
+    other four sit on the bench (x0.5). Assumes any five positions can start."""
+    xs = sorted(points, reverse=True)
+    return 2 * xs[0] + sum(xs[1:6]) + 0.5 * sum(xs[6:]) if xs else 0.0
+
+
+def best_lineup(ids, points):
+    order = sorted(ids, key=lambda i: -points.get(i, 0.0))
+    return {"captain": order[0] if order else None, "starters": order[:5], "sixth": order[5] if len(order) > 5 else None, "bench": order[6:]}
+
+
+def optimize_transfers(roster, info, weighted, budget, max_moves, beam=30, pool_size=28):
+    """Beam search over sell/buy pairs at the same position.
+
+    roster: player ids (key|team); info: id -> {"pos", "price"};
+    weighted: list of (weight, {id: expected points}) per round.
+    Returns the best roster found for each number of moves 1..max_moves."""
+
+    def score(ros):
+        return sum(w * lineup_value([pts.get(i, 0.0) for i in ros]) for w, pts in weighted)
+
+    def cost(ros):
+        return sum(info[i]["price"] for i in ros)
+
+    blended = defaultdict(float)
+    for w, pts in weighted:
+        for i, v in pts.items():
+            blended[i] += w * v
+    pool = defaultdict(list)
+    for pos in ("G", "F", "C"):
+        cands = [i for i in info if info[i]["pos"] == pos and i not in roster]
+        by_pts = sorted(cands, key=lambda i: -blended.get(i, 0.0))[:pool_size]
+        by_val = sorted(
+            (i for i in cands if blended.get(i, 0.0) >= 5),
+            key=lambda i: -blended.get(i, 0.0) / max(info[i]["price"], 1),
+        )[: pool_size // 2]
+        pool[pos] = list(dict.fromkeys(by_pts + by_val))
+
+    start = frozenset(roster)
+    base = score(start)
+    frontier = [(base, start, ())]
+    best_by_k = {}
+    seen = {start}
+    for k in range(1, max_moves + 1):
+        cand = []
+        for _, ros, moves in frontier:
+            bought = {m[1] for m in moves}
+            for out in ros:
+                if out in bought:
+                    continue
+                for inn in pool[info[out]["pos"]]:
+                    if inn in ros:
+                        continue
+                    new = (ros - {out}) | {inn}
+                    if new in seen or cost(new) > budget + 1e-9:
+                        continue
+                    seen.add(new)
+                    cand.append((score(new), new, moves + ((out, inn),)))
+        if not cand:
+            break
+        cand.sort(key=lambda c: -c[0])
+        frontier = cand[:beam]
+        top = frontier[0]
+        prev = best_by_k.get(k - 1, (base, start, ()))
+        best_by_k[k] = top if top[0] > prev[0] else prev
+    out = []
+    for k, (sc, ros, moves) in sorted(best_by_k.items()):
+        if not moves or sc <= base + 0.05:
+            continue
+        if out and out[-1]["moves"] == [list(m) for m in moves]:
+            continue
+        out.append(
+            {
+                "transfers": len(moves),
+                "moves": [list(m) for m in moves],
+                "gain": round(sc - base, 1),
+                "cost": round(cost(ros), 1),
+                "bank": round(budget - cost(ros), 1),
+            }
+        )
+    return {"base": round(base, 1), "options": out}

@@ -114,8 +114,8 @@ def get_injuries(force=False):
     return cache.get("fantasy:injuries", 30 * 60, lambda: fantasy.injuries(cfg["injury_report_url"]), force)
 
 
-def get_picks(rnd=None, force=False):
-    """Projected PIR and value per credit for a EuroLeague round."""
+def picks_inputs(force=False):
+    """Everything the projection model reads, from cache where possible."""
     season = sports.el_season()
     games = cache.get(
         f"el:games:{season}",
@@ -126,7 +126,6 @@ def get_picks(rnd=None, force=False):
     finished = [g for g in games if g["state"] == "post"]
     list(fantasy._BOX_POOL.map(lambda g: cached_box(season, g), finished))  # fill the cache in parallel
     logs = picks.el_logs(games, lambda g: cached_box(season, g))
-
     feiq = cache.get("picks:feiq", 60 * 60, picks.feiq_players, force)
     try:
         domestic = cache.get("picks:domestic", 6 * 3600, picks.feiq_domestic, force)
@@ -137,12 +136,36 @@ def get_picks(rnd=None, force=False):
     except Exception:  # noqa: BLE001
         inj = None
     injuries = {p["key"]: p for t in (inj or {}).get("teams", []) for p in t["players"]}
+    return {
+        "season": season, "games": games, "finished": finished, "logs": logs, "feiq": feiq,
+        "domestic": domestic, "inj": inj, "injuries": injuries,
+    }
 
+
+def round_rows(inputs, rnd):
+    """Projections for one round, cached for 15 minutes."""
+    key = f"picks:rows:v{picks.MODEL_VERSION}:{rnd}"
+
+    def build():
+        rows, ctx = picks.project(
+            inputs["feiq"]["players"], inputs["logs"], inputs["domestic"]["games"], inputs["games"], rnd, time.time(), inputs["injuries"]
+        )
+        rows.sort(key=lambda r: -r["xfp"])
+        return {"rows": rows, "home_edge": ctx["home_edge"], "rate": ctx["rate"]}
+
+    return cache.get(key, 15 * 60, build)
+
+
+def get_picks(rnd=None, force=False):
+    """Projected PIR and value per credit for a EuroLeague round."""
+    inp = picks_inputs(force)
+    season, games, finished, logs = inp["season"], inp["games"], inp["finished"], inp["logs"]
+    feiq, domestic, inj = inp["feiq"], inp["domestic"], inp["inj"]
     target = picks.next_round(games)
     rounds = sorted({g["round"] for g in games})
     rnd = int(rnd) if rnd and int(rnd) in rounds else target
-    rows, ctx = picks.project(feiq["players"], logs, domestic["games"], games, rnd, time.time(), injuries)
-    rows.sort(key=lambda r: -r["proj"])
+    built = round_rows(inp, rnd)
+    rows = built["rows"]
 
     done = sum(1 for r in rounds if all(g["state"] == "post" for g in games if g["round"] == r))
     bt = cache.get(
@@ -169,7 +192,7 @@ def get_picks(rnd=None, force=False):
         "track": picks.track_record(TRACK_DIR, logs, games),
         "coaches": picks.coach_rows(feiq["players"], games, rnd),
         "teams": info,
-        "context": {"home_edge": round(ctx["home_edge"], 3), "rate": {k: round(v, 3) for k, v in ctx["rate"].items()}},
+        "context": {"home_edge": round(built["home_edge"], 3), "rate": {k: round(v, 3) for k, v in built["rate"].items()}},
         "backtest": bt,
         "sources": {
             "prices": cache.fetched_at("picks:feiq"),
@@ -178,6 +201,77 @@ def get_picks(rnd=None, force=False):
             "games": len(finished),
         },
     }
+
+
+TEAM_PATH = os.path.join(os.path.dirname(TRACK_DIR), "my-team.json")
+
+
+def load_team():
+    try:
+        with open(TEAM_PATH) as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return None
+
+
+def save_team(body):
+    """Save the team as it stands in the official game. The first save in
+    a new round remembers the previous team, so transfers can be counted."""
+    inp = picks_inputs()
+    target = picks.next_round(inp["games"])
+    known = {f"{p['key']}|{p['team']}": p for p in inp["feiq"]["players"]}
+    players = [i for i in body.get("players", []) if i in known]
+    coach = body.get("coach") if body.get("coach") in known else None
+    counts = {pos: sum(1 for i in players if known[i]["pos"] == pos) for pos in ("G", "F", "C")}
+    if len(set(players)) != 10 or counts != {"G": 4, "F": 4, "C": 2} or not coach:
+        raise ValueError("A team needs 4 guards, 4 forwards, 2 centers and a coach")
+    old = load_team() or {}
+    round_start = old.get("round_start")
+    if not round_start or round_start.get("round") != target:
+        base = old if old.get("players") else {"players": players, "coach": coach}
+        round_start = {"round": target, "players": base["players"], "coach": base["coach"]}
+    team = {
+        "round": target,
+        "players": players,
+        "coach": coach,
+        "bank": round(float(body.get("bank", 0)), 1),
+        "lineup": body.get("lineup"),
+        "unlimited": bool(body.get("unlimited")),
+        "round_start": round_start,
+        "saved_at": time.time(),
+    }
+    os.makedirs(os.path.dirname(TEAM_PATH), exist_ok=True)
+    tmp = TEAM_PATH + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(team, f, indent=1)
+    os.replace(tmp, TEAM_PATH)
+    return team
+
+
+def suggest_transfers(body):
+    """Best transfers for a draft roster within budget and position limits."""
+    inp = picks_inputs()
+    target = picks.next_round(inp["games"])
+    rnd = int(body.get("round") or target)
+    horizon = 3 if body.get("horizon") == 3 else 1
+    weighted = []
+    for i, w in enumerate(picks.HORIZON_WEIGHTS[:horizon]):
+        rows = round_rows(inp, rnd + i)["rows"]
+        weighted.append((w, {f"{r['key']}|{r['team']}": r["xfp"] for r in rows}))
+    info = {
+        f"{p['key']}|{p['team']}": {"pos": p["pos"], "price": p["price"]}
+        for p in inp["feiq"]["players"]
+        if p["pos"] in ("G", "F", "C")
+    }
+    roster = [i for i in body.get("players", []) if i in info]
+    if len(roster) != 10:
+        raise ValueError("Pick all ten players first")
+    coach_price = next((p["price"] for p in inp["feiq"]["players"] if f"{p['key']}|{p['team']}" == body.get("coach")), 0.0)
+    budget = float(body.get("budget", 0)) - coach_price
+    max_moves = int(body.get("max_moves", 4))
+    result = picks.optimize_transfers(roster, info, weighted, budget, max(0, min(max_moves, 6)))
+    result["horizon"] = horizon
+    return result
 
 
 def get_markets(force=False):
@@ -284,11 +378,31 @@ class Handler(BaseHTTPRequestHandler):
             data = get_markets(force)
         elif route == "picks":
             data = get_picks(arg, force)
+        elif route == "myteam":
+            data = {"team": load_team()}
         else:
             data = None
         if data is None:
             return self._error(404, "Unknown endpoint")
         return self._json(data)
+
+    def do_POST(self):
+        parts = [p for p in urlparse(self.path).path.split("/") if p]
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+            if length > 200_000:
+                return self._error(413, "Request too large")
+            body = json.loads(self.rfile.read(length) or b"{}")
+            if parts == ["api", "myteam"]:
+                return self._json({"team": save_team(body)})
+            if parts == ["api", "myteam", "suggest"]:
+                return self._json(suggest_transfers(body))
+            return self._error(404, "Unknown endpoint")
+        except ValueError as e:
+            return self._error(400, str(e))
+        except Exception as e:  # noqa: BLE001
+            log.exception("POST failed")
+            return self._error(502, f"Could not complete the request: {e}")
 
     def _json(self, obj, status=200):
         body = json.dumps(obj, separators=(",", ":")).encode()

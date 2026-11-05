@@ -67,6 +67,7 @@ const SPORT_TABS = [
   { id: "euroleague", title: "EuroLeague", topic: "euroleague", league: "euroleague" },
   { id: "fantasy", title: "Fantasy" },
   { id: "picks", title: "Picks" },
+  { id: "team", title: "My team" },
   { id: "nba", title: "NBA", topic: "nba", league: "nba" },
   { id: "gbl", title: "Greek league", topic: "greek", league: "gbl" },
 ];
@@ -540,6 +541,7 @@ function renderSports() {
   const tab = SPORT_TABS.find((t) => t.id === active);
   if (tab.id === "fantasy") return nav + renderFantasy();
   if (tab.id === "picks") return nav + renderPicks();
+  if (tab.id === "team") return nav + renderTeam();
   return nav + renderLeague(tab);
 }
 

@@ -199,15 +199,15 @@ def simulate_round(roster, info, lineup=None, n=4000, seed=7, subs=True):
             today = day_idx == d
             # morning value: real score if played, news-aware expectation today, expectation later
             val = np.where(started[None, :], score, np.where(today[None, :], plays * mean[None, :], expect[None, :]))
-            cap_locked = started[cap]
             # bench players who have played cannot come in
             eligible = full | ~started[None, :]
             eligible[np.arange(n), cap] = True
             v = np.where(eligible, val, -1e9)
-            # captain stays if his game has started; otherwise the best eligible non-started starter candidate
-            # a new captain must be someone whose game has not started
+            # the captain can change every gameday, but only to someone who has not played;
+            # a captain who has played is kept unless someone is expected to beat his real score
             v_cap = np.where(~started[None, :] & eligible, val, -1e9)
-            new_cap = np.where(cap_locked, cap, np.argmax(v_cap, axis=1))
+            v_cap[np.arange(n), cap] = val[np.arange(n), cap]
+            new_cap = np.argmax(v_cap, axis=1)
             # fill the five full-point slots with the best remaining eligible players
             v2 = v.copy()
             v2[np.arange(n), new_cap] = -2e9

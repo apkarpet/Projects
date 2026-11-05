@@ -629,10 +629,8 @@ function swapProblem(a, b) {
 
 function captainProblem(id) {
   const l = teamState.liveDraft;
-  const savedCap = teamState.live.lineup.captain;
   if (!l.starters.includes(id)) return "The captain has to be one of the five starters.";
   if (id === l.captain) return "He is already captain.";
-  if (hasStarted(savedCap)) return "Your captain has already played, so the captaincy is fixed for this round.";
   if (hasStarted(id)) return "A new captain must be someone whose game has not started.";
   return "";
 }
@@ -865,13 +863,20 @@ function liveSubsPanel(L) {
           livePlayer(m.in)?.xfp
         )}. Decide by ${day(m.by)}.</p></div>`
       )
-      .join("")}${s.captain ? `<p class="prose">Make ${name(s.captain)} captain.</p>` : ""}
+      .join("")}${
+        s.captain
+          ? `<div class="sugg"><div class="sugg-head"><span><span class="muted">Captain</span> ${name(L.lineup.captain)} <span class="muted">to</span> ${name(s.captain)}</span></div>
+        <p class="pick-note">${livePlayer(L.lineup.captain)?.state === "post" ? `${name(L.lineup.captain)} finished with ${fmt(livePlayer(L.lineup.captain).fp)}. ` : ""}${name(
+          s.captain
+        )} is expected to score ${fmt(livePlayer(s.captain)?.xfp)}. Decide by ${day(s.captain_by)}.</p></div>`
+          : ""
+      }
       <div class="sel-actions"><button type="button" class="btn" data-taction="lsuggest">Use suggested subs</button></div>`;
   return `<section class="panel">
     <div class="panel-head"><h2>Suggested subs</h2></div>
     ${edited ? `<p class="pick-note">These are for your saved lineup. Save your changes to refresh them.</p>` : ""}
     ${body}
-    <p class="panel-note">A starter whose game is over can go to the bench for a bench player who has not played yet. Bench players whose game has started cannot come in. The captain is fixed once he has played. Swaps worth under 1 point are left out.</p>
+    <p class="panel-note">A starter whose game is over can go to the bench for a bench player who has not played yet. Bench players whose game has started cannot come in. The captain can change every gameday, even after he has played, but only to a starter who has not played yet; the old captain then counts ×1. Swaps worth under 1 point are left out.</p>
   </section>`;
 }
 

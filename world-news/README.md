@@ -1,9 +1,9 @@
-# Fantasy Desk
+# Fantasy
 
 A local EuroLeague Fantasy Challenge assistant with basketball scores, on `http://localhost:8420`.
 
 ```sh
-fantasy          # or: news. Starts the server if needed and opens the site
+fantasy          # starts the server if needed and opens the site
 fantasy stop     # stop it
 fantasy restart  # after editing Python code
 fantasy logs     # follow the server log
@@ -14,9 +14,9 @@ It needs Python 3.11+ with numpy and scipy. Press `1` to `4` to switch tabs and 
 ## Tabs
 
 - **My team**:
-  - **Live round:** while a round is being played, your lineup is on a court with real points for finished games (PIR, +10% for a win, then the slot multiplier), live scores, and expected points for games to come. It also suggests morning subs that follow the official rules and says by which morning to make each one.
+  - **Live round:** while a round is being played, your lineup is on a court with real points for finished games (PIR, +10% for a win, then the slot multiplier), live scores, and expected points for games to come. It also suggests morning subs that follow the official rules, including a captain change between gamedays (even after your captain has played, to a starter who has not), and says by which morning to make each one.
   - **Next round:** plan transfers on the court. Click a player to make him captain, swap him or sell him. Suggestions are the mathematically best team for 1 to 4 transfers, or a full rebuild in unlimited rounds, each checked by simulating the round 4,000 times with daily subs.
-  - Plan here, make the same moves in the official app, then press Save. The team is kept in `~/.local/share/world-news/my-team.json`.
+  - Plan here, make the same moves in the official app, then press Save. The team is kept in `~/.local/share/fantasy/my-team.json`.
 - **Picks**:
   - Captain choices, top projected, best value, differentials and fades.
   - The best team from scratch for your budget.
@@ -47,10 +47,10 @@ Every model change was tested by replaying finished rounds with only the informa
 | Injury report | BasketNews "EuroLeague Injury Report (updated daily)" |
 | NBA and Greek league scores | ESPN public API, esake.gr |
 
-Kept in `~/.local/share/world-news/`:
+Kept in `~/.local/share/fantasy/`:
 
 - `tracking/`: pre-lock projections for each round
 - `prices.jsonl`: one price snapshot a day
 - `my-team.json`: your team
 
-Caches are in `~/.cache/world-news/`.
+Caches are in `~/.cache/fantasy/`.

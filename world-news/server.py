@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fantasy Desk: EuroLeague Fantasy tools and basketball scores on localhost.
+"""Fantasy: EuroLeague Fantasy tools and basketball scores on localhost.
 
     python3 server.py            # serve on the port from config.json
     python3 server.py --port N   # override the port
@@ -22,9 +22,11 @@ from newsdesk.cache import Cache
 ROOT = os.path.dirname(os.path.abspath(__file__))
 STATIC = os.path.join(ROOT, "static")
 CONFIG_PATH = os.path.join(ROOT, "config.json")
-CACHE_DIR = os.path.join(os.environ.get("XDG_CACHE_HOME", os.path.expanduser("~/.cache")), "world-news")
+_CACHE_HOME = os.environ.get("XDG_CACHE_HOME", os.path.expanduser("~/.cache"))
+_DATA_HOME = os.environ.get("XDG_DATA_HOME", os.path.expanduser("~/.local/share"))
+CACHE_DIR = os.path.join(_CACHE_HOME, "fantasy")
 # Pre-lock projections are kept for good (not a cache) so each round can be scored later.
-TRACK_DIR = os.path.join(os.environ.get("XDG_DATA_HOME", os.path.expanduser("~/.local/share")), "world-news", "tracking")
+TRACK_DIR = os.path.join(_DATA_HOME, "fantasy", "tracking")
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s", datefmt="%H:%M:%S")
 log = logging.getLogger("newsdesk")
@@ -440,7 +442,7 @@ def get_live_team():
 def save_live_lineup(body):
     """Save subs for the round in progress, enforcing the official rules:
     a bench player whose game has started cannot come in, and the captain
-    is fixed once his game has started (a new captain must not have played)."""
+    can change between gamedays, but only to someone who has not played."""
     team = load_team()
     if not team or not team.get("live"):
         raise ValueError("No live lineup saved")
@@ -457,11 +459,8 @@ def save_live_lineup(body):
         if started.get(i) and i not in old_full:
             name = next((p["name"] for p in current["players"] if p["id"] == i), i)
             raise ValueError(f"{name}'s game has started, so he cannot come off the bench")
-    if cap != old["captain"]:
-        if started.get(old["captain"]):
-            raise ValueError("Your captain has already played, so the captaincy is fixed for this round")
-        if started.get(cap):
-            raise ValueError("A new captain must be someone whose game has not started")
+    if cap != old["captain"] and started.get(cap):
+        raise ValueError("A new captain must be someone whose game has not started")
     team["live"]["lineup"] = {"captain": cap, "starters": starters, "sixth": sixth, "bench": bench}
     tmp = TEAM_PATH + ".tmp"
     with open(tmp, "w") as f:
@@ -582,7 +581,7 @@ class Handler(BaseHTTPRequestHandler):
     server_version = "FantasyDesk/1.0"
 
     def log_message(self, fmt, *args):  # keep the log readable
-        if os.environ.get("WORLD_NEWS_DEBUG"):
+        if os.environ.get("FANTASY_DEBUG"):
             super().log_message(fmt, *args)
 
     def do_GET(self):
@@ -686,7 +685,7 @@ def main():
     port = args.port or int(config().get("port", 8420))
     httpd = ThreadingHTTPServer(("127.0.0.1", port), Handler)
     httpd.daemon_threads = True
-    log.info("Fantasy Desk on http://localhost:%d", port)
+    log.info("Fantasy on http://localhost:%d", port)
     if not args.no_warmup:
         threading.Thread(target=warm_up, daemon=True).start()
         threading.Thread(target=keep_picks_fresh, daemon=True).start()

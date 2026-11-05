@@ -1014,20 +1014,23 @@ def gameday_subs(lineup, entries, min_gain=1.0):
     expected before), "locked": True once his game has started, "tip"}.
     Rules: a starter whose game has started can only move to the bench, a
     bench player whose game has started cannot come in, and the captain
-    must start. Swaps worth less than min_gain points are left out because
-    the projections are not that precise."""
+    must start. The captain can change between gamedays, even after he has
+    played, but only to a starter who has not played yet; the old captain
+    then counts x1. Swaps worth less than min_gain points are left out
+    because the projections are not that precise."""
     ones = list(lineup["starters"]) + [lineup["sixth"]]
     bench = list(lineup["bench"])
     cap = lineup["captain"]
     val = lambda i: entries.get(i, {}).get("value", 0.0)
     locked = lambda i: entries.get(i, {}).get("locked", False)
 
+    # a played captain is worth his real score, so he is only replaced by
+    # someone expected to beat it
     new_cap = cap
-    if not locked(cap):
-        starters_open = [i for i in lineup["starters"] if not locked(i)]
-        best = max(starters_open, key=val, default=cap)
-        if val(best) > val(cap) + min_gain:
-            new_cap = best
+    starters_open = [i for i in lineup["starters"] if not locked(i) and i != cap]
+    best = max(starters_open, key=val, default=None)
+    if best is not None and val(best) > val(cap) + min_gain:
+        new_cap = best
 
     # pair the weakest full-point players with the strongest bench players who can still come in
     out_pool = sorted((i for i in ones if i != new_cap), key=val)
@@ -1057,6 +1060,7 @@ def gameday_subs(lineup, entries, min_gain=1.0):
     return {
         "moves": moves,
         "captain": new_cap if new_cap != cap else None,
+        "captain_by": entries.get(new_cap, {}).get("tip") if new_cap != cap else None,
         "gain": round(gain, 1),
         "lineup": {"captain": new_cap, "starters": starters, "sixth": sixth, "bench": bench_new},
     }

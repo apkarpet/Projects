@@ -489,6 +489,12 @@ function gamedayPanel(pool) {
 function renderTeam() {
   const P = state.picks;
   if (!P) return `<div class="picks">${skeleton(8)}</div>`;
+  if (!teamState.liveLoaded) {
+    loadLive();
+    return `<div class="picks">${skeleton(8)}</div>`;
+  }
+  if (teamState.view == null) teamState.view = teamState.live && !teamState.live.done ? "live" : "plan";
+  if (teamState.view === "live" && teamState.live) return renderLive();
   if (!teamState.loaded) {
     loadTeam();
     return `<div class="picks">${skeleton(8)}</div>`;
@@ -508,6 +514,7 @@ function renderTeam() {
         <h2 class="picks-title">My team</h2>
         <p class="picks-sub">Round ${P.round}. Plan changes here, make the same moves in the official app, then save.</p>
       </div>
+      ${viewSwitch()}
       <div class="team-actions">
         <button type="button" class="btn" data-taction="auto">Best lineup</button>
         <button type="button" class="btn" data-taction="reset" ${changed ? "" : "disabled"}>Undo changes</button>
@@ -527,5 +534,193 @@ function renderTeam() {
       <aside class="rail">${suggestionsPanel(pool)}${gamedayPanel(pool)}</aside>
     </div>
     <p class="pick-note">Assumes any five positions can start. Points shown are expected fantasy points times each slot's multiplier.</p>
+  </div>`;
+}
+
+/* ---------------------------------------------------------------- live round */
+
+teamState.view = null; // "live" or "plan"
+teamState.live = null;
+teamState.liveLoading = false;
+
+async function loadLive() {
+  if (teamState.liveLoading) return;
+  teamState.liveLoading = true;
+  try {
+    teamState.live = (await api("myteam/live")).live;
+    teamState.liveError = null;
+  } catch (e) {
+    teamState.liveError = e.message;
+  }
+  teamState.liveLoading = false;
+  teamState.liveLoaded = true;
+  render();
+}
+
+// keep live scores moving while games are on
+setInterval(() => {
+  if (document.visibilityState !== "visible" || state.tab !== "sports" || state.sub.sports !== "team" || teamState.view !== "live") return;
+  const L = teamState.live;
+  if (!L || L.done) return;
+  const anyLive = L.players.some((p) => p.state === "in");
+  const now = Date.now() / 1000;
+  if (anyLive || L.players.some((p) => p.state === "pre" && p.tip && p.tip < now)) loadLive();
+}, 60_000);
+
+function viewSwitch() {
+  const L = teamState.live;
+  if (!L || L.done) return "";
+  const planRound = state.picks?.round;
+  return seg(
+    "tview",
+    [
+      { key: "live", label: `Round ${L.round} now` },
+      { key: "plan", label: `Round ${planRound} plan` },
+    ],
+    teamState.view
+  ).replaceAll('data-action="tview"', 'data-taction="view"');
+}
+
+document.addEventListener("click", (e) => {
+  const el = e.target.closest("[data-taction]");
+  if (!el) return;
+  if (el.dataset.taction === "view") {
+    teamState.view = el.dataset.id;
+    render();
+  } else if (el.dataset.taction === "madesubs") {
+    const s = teamState.live?.subs;
+    if (!s) return;
+    apiPost("myteam/live", { lineup: s.lineup })
+      .then((d) => {
+        teamState.live = d.live;
+        teamState.liveMsg = "Lineup updated with these subs.";
+        render();
+      })
+      .catch((err) => {
+        teamState.liveMsg = `Not updated: ${err.message}`;
+        render();
+      });
+  }
+});
+
+function resultLine(p) {
+  if (p.state === "post") {
+    const [h, a] = p.score || [];
+    const mine = p.home ? h : a;
+    const theirs = p.home ? a : h;
+    return `<span class="${p.won ? "up" : "down"}">${p.won ? "W" : "L"} ${mine}-${theirs}</span> ${p.home ? "vs" : "at"} ${esc(p.opp)}`;
+  }
+  if (p.state === "in") {
+    const [h, a] = p.score || [];
+    return `<span class="live">${esc(p.detail || "Live")}</span> ${p.home ? h : a}-${p.home ? a : h}`;
+  }
+  return `${p.home ? "vs" : "at"} ${esc(p.opp || "")}, ${esc(shortTime(p.tip))}`;
+}
+
+function liveChip(p) {
+  const crest = state.picks?.teams?.[p.team]?.crest;
+  const multTxt = p.mult === 2 ? " ×2" : p.mult === 0.5 ? " ×½" : "";
+  let big, small, line;
+  if (p.state === "pre") {
+    big = fmt(p.xfp * p.mult);
+    small = `expected${multTxt}`;
+    line = `${fmt(p.price)} cr${p.status ? ` <span class="st-${p.severity ?? 2}">${esc(p.status)}</span>` : ""}`;
+  } else if (!p.played) {
+    big = "0";
+    small = p.state === "post" ? "did not play" : "not in yet";
+    line = "";
+  } else {
+    big = fmt(p.total);
+    small = `${p.pir} PIR${p.won ? " +10%" : ""}${multTxt}`;
+    line = `${p.pts} pts, ${p.reb} reb, ${p.ast} ast, ${p.min} min`;
+  }
+  const cls = ["pchip", "live-chip", `r-${p.role}`, p.state === "post" ? "done" : "", p.state === "in" ? "playing" : "", (p.severity ?? 3) <= 1 && p.state === "pre" ? "doubt" : ""].join(" ");
+  return `<div class="${cls}">
+    ${p.role === "captain" ? `<span class="pc-badge" title="Captain">C</span>` : ""}
+    <span class="pc-top">${crest ? `<img src="${esc(crest)}" alt="" width="18" height="18">` : ""}<span class="pc-pos">${p.pos || ""}</span></span>
+    <span class="pc-name">${esc(lastName(p.name))}</span>
+    <span class="pc-meta">${resultLine(p)}</span>
+    <span class="pc-pts">${big}<small> ${small}</small></span>
+    <span class="pc-price">${line}</span>
+  </div>`;
+}
+
+function liveCourt(L) {
+  const by = new Map(L.players.map((p) => [p.id, p]));
+  const order = { G: 0, F: 1, C: 2 };
+  const starters = [...L.lineup.starters].sort((a, b) => (order[by.get(a)?.pos] ?? 1) - (order[by.get(b)?.pos] ?? 1));
+  const spots = starters.map((id, i) => `<div class="spot spot-${i + 1}">${liveChip(by.get(id))}</div>`).join("");
+  const c = L.coach;
+  let coachLine = "";
+  if (c) {
+    const res = c.state === "post" ? `<span class="${c.won ? "up" : "down"}">${c.won ? "Won" : "Lost"}</span>` : c.state === "in" ? `<span class="live">Live</span>` : esc(shortTime(c.tip));
+    coachLine = `<div class="pchip live-chip coach"><span class="pc-top"><span class="pc-pos">Coach</span></span><span class="pc-name">${esc(lastName(c.name || ""))}</span><span class="pc-meta">${
+      c.home ? "vs" : "at"
+    } ${esc(c.opp || "")}</span><span class="pc-pts" style="font-size:1rem">${res}</span></div>`;
+  }
+  return `<div class="court-wrap">
+    <div class="court">${COURT}${spots}</div>
+    <div class="bench">
+      <div class="bench-group"><span class="bench-label">Sixth man</span>${liveChip(by.get(L.lineup.sixth))}</div>
+      <div class="bench-group grow"><span class="bench-label">Bench, half points</span><div class="bench-row">${L.lineup.bench.map((id) => liveChip(by.get(id))).join("")}</div></div>
+      <div class="bench-group"><span class="bench-label">Coach</span>${coachLine}</div>
+    </div>
+  </div>`;
+}
+
+function morningSubsPanel(L) {
+  const by = new Map(L.players.map((p) => [p.id, p]));
+  const s = L.subs;
+  const name = (id) => esc(by.get(id)?.name || id);
+  const day = (ts) => {
+    if (!ts) return "";
+    const d = new Date(ts * 1000);
+    const today = new Date();
+    return d.toDateString() === today.toDateString() ? "this morning" : `${d.toLocaleDateString("en-GB", { weekday: "long" })} morning`;
+  };
+  let body;
+  if (!s.moves.length && !s.captain) body = `<p class="prose">No subs worth making: your full-point slots already hold your best remaining scorers.</p>`;
+  else
+    body = `${s.moves
+      .map(
+        (m) => `<div class="sugg"><div class="sugg-head"><span><span class="muted">Bench</span> ${name(m.out)} <span class="muted">for</span> ${name(m.in)}</span><span class="up strong">+${fmt(
+          m.gain
+        )}</span></div>
+        <div class="sugg-foot"><span class="muted">${by.get(m.out)?.state === "post" ? `${name(m.out)} has finished with ${fmt(by.get(m.out).fp)}. ` : ""}${name(m.in)} is expected to score ${fmt(
+          by.get(m.in)?.xfp
+        )}.</span></div>
+        <p class="pick-note">Decide by ${day(m.by)}.</p></div>`
+      )
+      .join("")}${s.captain ? `<p class="prose">Make ${name(s.captain)} captain.</p>` : ""}
+      <div class="sel-actions"><button type="button" class="btn" data-taction="madesubs">I made these subs</button></div>`;
+  return `<section class="panel">
+    <div class="panel-head"><h2>Subs for the rest of the round</h2></div>
+    ${body}
+    ${teamState.liveMsg ? `<p class="team-msg">${esc(teamState.liveMsg)}</p>` : ""}
+    <p class="panel-note">A starter whose game is over can go to the bench for a bench player who has not played yet. Bench players whose game has started cannot come in. Swaps worth under 1 point are left out.</p>
+  </section>`;
+}
+
+function renderLive() {
+  const L = teamState.live;
+  const playing = L.players.filter((p) => p.state === "in").length;
+  return `<div class="picks myteam">
+    <div class="picks-head">
+      <div>
+        <h2 class="picks-title">My team</h2>
+        <p class="picks-sub">Round ${L.round}, in progress. Finished games show real points; the rest show what is expected.</p>
+      </div>
+      ${viewSwitch()}
+    </div>
+    <div class="team-stats">
+      <div><span class="ts-big">${fmt(L.banked)}</span><span class="ts-label">points from finished games</span></div>
+      ${playing ? `<div><span class="ts-big live">${fmt(L.live_now)}</span><span class="ts-label">in ${playing} game${playing > 1 ? "s" : ""} now</span></div>` : ""}
+      <div><span class="ts-big">${fmt(L.to_come)}</span><span class="ts-label">expected from games to come</span></div>
+      <div><span class="ts-big">${fmt(L.projected)}</span><span class="ts-label">projected round total</span></div>
+    </div>
+    <div class="layout">
+      <div class="main team-main">${liveCourt(L)}</div>
+      <aside class="rail">${morningSubsPanel(L)}</aside>
+    </div>
   </div>`;
 }

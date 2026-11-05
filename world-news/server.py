@@ -238,6 +238,7 @@ def save_team(body):
         "lineup": body.get("lineup"),
         "unlimited": bool(body.get("unlimited")),
         "round_start": round_start,
+        "live": old.get("live"),
         "saved_at": time.time(),
     }
     os.makedirs(os.path.dirname(TEAM_PATH), exist_ok=True)
@@ -246,6 +247,135 @@ def save_team(body):
         json.dump(team, f, indent=1)
     os.replace(tmp, TEAM_PATH)
     return team
+
+
+def live_box(season, game):
+    """Box score for a game in progress, refreshed every minute."""
+    return cache.get(f"boxlive:{season}:{game['id']}", 60, lambda: fantasy.box_score(season, game))
+
+
+def get_live_team():
+    """The saved lineup for a round in progress, scored game by game."""
+    team = load_team()
+    live = (team or {}).get("live")
+    if not live:
+        return {"live": None}
+    inp = picks_inputs()
+    rnd = live["round"]
+    lineup = live["lineup"]
+    games = sports.el_games(inp["season"]) if any(g["round"] == rnd and g["state"] == "in" for g in inp["games"]) else inp["games"]
+    fixtures = picks._round_games(games, rnd)
+    proj = {f"{r['key']}|{r['team']}": r for r in round_rows(inp, rnd)["rows"]}
+    people = {f"{p['key']}|{p['team']}": p for p in inp["feiq"]["players"]}
+
+    def role(i):
+        if i == lineup["captain"]:
+            return "captain"
+        if i in lineup["starters"]:
+            return "starter"
+        return "sixth" if i == lineup["sixth"] else "bench"
+
+    mult = {"captain": 2.0, "starter": 1.0, "sixth": 1.0, "bench": 0.5}
+    rows, entries = [], {}
+    for i in lineup["starters"] + [lineup["sixth"]] + lineup["bench"]:
+        p = people.get(i, {})
+        key, team_code = i.rsplit("|", 1)[0], i.rsplit("|", 1)[1]
+        g, home = fixtures.get(team_code, (None, None))
+        state = g["state"] if g else "none"
+        line = None
+        if state in ("post", "in"):
+            box = cached_box(inp["season"], g) if state == "post" else live_box(inp["season"], g)
+            line = next((x for x in box if x["key"] == key and x["team"] == team_code), None)
+        won = None
+        if state == "post":
+            won = (g.get("winner") == "home") == bool(home)
+        pir = line["pir"] if line else (0 if state == "post" else None)
+        fp = pir * (1 + picks.WIN_BONUS * bool(won)) if pir is not None else None
+        r = role(i)
+        expected = proj.get(i, {}).get("xfp", 0.0)
+        value = fp if state in ("post", "in") else expected
+        entries[i] = {"value": value or 0.0, "locked": state in ("post", "in"), "tip": g["ts"] if g else None}
+        opp = (g["away"] if home else g["home"]) if g else None
+        rows.append(
+            {
+                "id": i,
+                "name": p.get("name", key),
+                "team": team_code,
+                "pos": p.get("pos"),
+                "price": p.get("price"),
+                "role": r,
+                "mult": mult[r],
+                "state": state,
+                "tip": g["ts"] if g else None,
+                "opp": opp["code"] if opp else None,
+                "home": home,
+                "score": [g["home"]["score"], g["away"]["score"]] if g and state != "pre" else None,
+                "detail": g.get("detail") if g else None,
+                "won": won,
+                "played": line is not None,
+                "min": line["min"] if line else None,
+                "pir": pir,
+                "pts": line["pts"] if line else None,
+                "reb": line["reb"] if line else None,
+                "ast": line["ast"] if line else None,
+                "fp": round(fp, 1) if fp is not None else None,
+                "xfp": expected,
+                "status": proj.get(i, {}).get("status"),
+                "severity": proj.get(i, {}).get("severity"),
+                "total": round((fp if fp is not None else 0) * mult[r], 1),
+            }
+        )
+    banked = sum(r["total"] for r in rows if r["state"] == "post")
+    live_now = sum(r["total"] for r in rows if r["state"] == "in")
+    to_come = sum(r["xfp"] * r["mult"] for r in rows if r["state"] == "pre")
+    coach = None
+    if team.get("coach"):
+        c_team = team["coach"].rsplit("|", 1)[1]
+        g, home = fixtures.get(c_team, (None, None))
+        cp = people.get(team["coach"], {})
+        coach = {
+            "name": cp.get("name"),
+            "team": c_team,
+            "state": g["state"] if g else None,
+            "tip": g["ts"] if g else None,
+            "opp": ((g["away"] if home else g["home"])["code"]) if g else None,
+            "home": home,
+            "won": ((g.get("winner") == "home") == bool(home)) if g and g["state"] == "post" else None,
+            "score": [g["home"]["score"], g["away"]["score"]] if g and g["state"] != "pre" else None,
+        }
+    subs = picks.gameday_subs(lineup, entries)
+    next_tip = min((r["tip"] for r in rows if r["state"] == "pre" and r["tip"]), default=None)
+    return {
+        "live": {
+            "round": rnd,
+            "lineup": lineup,
+            "players": rows,
+            "coach": coach,
+            "banked": round(banked, 1),
+            "live_now": round(live_now, 1),
+            "to_come": round(to_come, 1),
+            "projected": round(banked + live_now + to_come, 1),
+            "subs": subs,
+            "next_tip": next_tip,
+            "done": all(r["state"] == "post" for r in rows),
+        }
+    }
+
+
+def save_live_lineup(body):
+    team = load_team()
+    if not team or not team.get("live"):
+        raise ValueError("No live lineup saved")
+    l = body.get("lineup") or {}
+    ids = list(l.get("starters", [])) + [l.get("sixth")] + list(l.get("bench", []))
+    if sorted(ids) != sorted(team["players"]) or l.get("captain") not in l.get("starters", []):
+        raise ValueError("The lineup must use your ten players with the captain among the starters")
+    team["live"]["lineup"] = {"captain": l["captain"], "starters": l["starters"], "sixth": l["sixth"], "bench": l["bench"]}
+    tmp = TEAM_PATH + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(team, f, indent=1)
+    os.replace(tmp, TEAM_PATH)
+    return get_live_team()
 
 
 def suggest_transfers(body):
@@ -378,6 +508,8 @@ class Handler(BaseHTTPRequestHandler):
             data = get_markets(force)
         elif route == "picks":
             data = get_picks(arg, force)
+        elif route == "myteam" and arg == "live":
+            data = get_live_team()
         elif route == "myteam":
             data = {"team": load_team()}
         else:
@@ -395,6 +527,8 @@ class Handler(BaseHTTPRequestHandler):
             body = json.loads(self.rfile.read(length) or b"{}")
             if parts == ["api", "myteam"]:
                 return self._json({"team": save_team(body)})
+            if parts == ["api", "myteam", "live"]:
+                return self._json(save_live_lineup(body))
             if parts == ["api", "myteam", "suggest"]:
                 return self._json(suggest_transfers(body))
             return self._error(404, "Unknown endpoint")

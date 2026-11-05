@@ -975,3 +975,58 @@ def optimize_transfers(roster, info, weighted, budget, max_moves, beam=30, pool_
             }
         )
     return {"base": round(base, 1), "options": out}
+
+
+def gameday_subs(lineup, entries, min_gain=1.0):
+    """Best subs for the rest of a round in progress.
+
+    entries: id -> {"value": points (actual once his game has started,
+    expected before), "locked": True once his game has started, "tip"}.
+    Rules: a starter whose game has started can only move to the bench, a
+    bench player whose game has started cannot come in, and the captain
+    must start. Swaps worth less than min_gain points are left out because
+    the projections are not that precise."""
+    ones = list(lineup["starters"]) + [lineup["sixth"]]
+    bench = list(lineup["bench"])
+    cap = lineup["captain"]
+    val = lambda i: entries.get(i, {}).get("value", 0.0)
+    locked = lambda i: entries.get(i, {}).get("locked", False)
+
+    new_cap = cap
+    if not locked(cap):
+        starters_open = [i for i in lineup["starters"] if not locked(i)]
+        best = max(starters_open, key=val, default=cap)
+        if val(best) > val(cap) + min_gain:
+            new_cap = best
+
+    # pair the weakest full-point players with the strongest bench players who can still come in
+    out_pool = sorted((i for i in ones if i != new_cap), key=val)
+    in_pool = sorted((i for i in bench if not locked(i)), key=lambda i: -val(i))
+    moves = []
+    for out, inn in zip(out_pool, in_pool):
+        gain = 0.5 * (val(inn) - val(out))
+        if gain < min_gain:
+            break
+        # decide before the first of the two games that has not started yet
+        tips = [entries.get(i, {}).get("tip") for i in (out, inn) if not locked(i)]
+        tips = [t for t in tips if t]
+        moves.append({"out": out, "in": inn, "gain": round(gain, 1), "by": min(tips) if tips else None})
+
+    starters = list(lineup["starters"])
+    sixth = lineup["sixth"]
+    bench_new = list(bench)
+    for m in moves:
+        if m["out"] in starters:
+            starters[starters.index(m["out"])] = m["in"]
+        else:
+            sixth = m["in"]
+        bench_new[bench_new.index(m["in"])] = m["out"]
+    gain = sum(m["gain"] for m in moves)
+    if new_cap != cap:
+        gain += val(new_cap) - val(cap)
+    return {
+        "moves": moves,
+        "captain": new_cap if new_cap != cap else None,
+        "gain": round(gain, 1),
+        "lineup": {"captain": new_cap, "starters": starters, "sixth": sixth, "bench": bench_new},
+    }

@@ -908,3 +908,8 @@ kbd {
   .court { aspect-ratio: 500 / 520; }
   .ts-big { font-size: 1.5rem; }
 }
+.live-chip { cursor: default; }
+.live-chip:hover { background: var(--surface); }
+.live-chip.done { border-width: 2px; }
+.live-chip.playing { border-color: var(--live); }
+.ts-big.live { color: var(--live); }

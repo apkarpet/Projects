@@ -83,7 +83,7 @@ def get_league(league, force=False):
 
 
 def cached_box(season, game):
-    return cache.get(f"box2:{season}:{game['id']}", float("inf"), lambda: fantasy.box_score(season, game))
+    return cache.get(f"box3:{season}:{game['id']}", float("inf"), lambda: fantasy.box_score(season, game))
 
 
 def get_fantasy(force=False):
@@ -144,7 +144,7 @@ def get_picks(rnd=None, force=False):
 
     done = sum(1 for r in rounds if all(g["state"] == "post" for g in games if g["round"] == r))
     bt = cache.get(
-        f"picks:backtest:{season}:{done}",
+        f"picks:backtest:v{picks.MODEL_VERSION}:{season}:{done}",
         float("inf"),
         lambda: picks.backtest(feiq["players"], logs, domestic["games"], games),
     )

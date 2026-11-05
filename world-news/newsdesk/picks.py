@@ -30,15 +30,26 @@ from zoneinfo import ZoneInfo
 from .fantasy import player_key
 from .net import fetch_text
 
+# Settings were tuned on rounds 4-7 and checked on rounds 8-9 (2026-27).
+# Bump MODEL_VERSION whenever the model changes so the backtest reruns.
+MODEL_VERSION = 2
+
 FEIQ = "https://www.fantasyedgeiq.com"
 CET = ZoneInfo("Europe/Paris")
 
-PRIOR_MINUTES = 80  # how strongly last season's rate anchors this season's
-RECENT_EXTRA = 0.5  # extra weight on the last 3 EuroLeague games
+PRIOR_MINUTES = 160  # how strongly last season's rate anchors this season's
+RECENT_EXTRA = 0.0  # extra weight on the last 3 EuroLeague games (backtests found none helps)
 DOMESTIC_WEIGHT = 0.3  # domestic minutes count 30% as much as EuroLeague ones
 DOMESTIC_EST_WEIGHT = 0.2  # ...and less when PIR had to be estimated
 AVAILABILITY = {0: 0.0, 1: 0.4, 2: 0.75, 3: 0.95}  # by injury severity
 MAX_INHERITED = 6.0  # cap on minutes a player can inherit from injured teammates
+EWMA_ALPHA = 0.3  # how fast minutes forget older games
+DOMESTIC_MIN_SHARE = 0.0  # weight of recent domestic minutes in projected minutes
+DVP_STRENGTH = 1.0  # how much of the opponent's position effect to apply
+DVP_SHRINK = 4  # games of evidence before trusting it halfway
+DVP_STAT = "pir"  # which stat "allowed by position" is measured in: pir or pts
+PACE_STRENGTH = 0.0  # how much of the expected game pace to apply
+CALIBRATION = 0.9  # overall scale; PIR is right-skewed, so the MAE-optimal value is a bit below 1
 
 
 def _f(v):
@@ -186,7 +197,7 @@ def _league_context(logs, posmap):
         pir[pos] += r["pir"]
         home[r["home"]][0] += r["pir"]
         home[r["home"]][1] += r["min"]
-        allowed[r["opp"]][pos][r["game"]] += r["pir"]
+        allowed[r["opp"]][pos][r["game"]] += r[DVP_STAT]
     rate = {p: pir[p] / mins[p] for p in mins if mins[p]}
     overall = sum(pir.values()) / max(1, sum(mins.values()))
     for p in ("G", "F", "C"):
@@ -208,18 +219,43 @@ def _league_context(logs, posmap):
                 dvp[t][p] = (1.0, 0)
                 continue
             ratio = statistics.mean(games.values()) / league_avg[p]
-            shrink = len(games) / (len(games) + 4)
-            dvp[t][p] = (max(0.85, min(1.15, 1 + 0.7 * (ratio - 1) * shrink)), len(games))
+            shrink = len(games) / (len(games) + DVP_SHRINK)
+            dvp[t][p] = (max(0.85, min(1.15, 1 + DVP_STRENGTH * (ratio - 1) * shrink)), len(games))
     # rank 1 = most generous defence for that position
     ranks = {}
     for p in ("G", "F", "C"):
         order = sorted(dvp, key=lambda t: -dvp[t][p][0])
         for i, t in enumerate(order, 1):
             ranks[(t, p)] = i
-    return {"rate": rate, "home_edge": edge, "dvp": dvp, "dvp_rank": ranks, "teams": len(dvp)}
+    # possessions per game: FGA - OREB + TOV + 0.44 FTA, from both teams' lines
+    poss = defaultdict(lambda: defaultdict(float))
+    for r in logs:
+        poss[r["team"]][r["game"]] += r.get("fga", 0) - r.get("oreb", 0) + r.get("tov", 0) + 0.44 * r.get("fta", 0)
+    pace = {t: statistics.mean(g.values()) for t, g in poss.items() if g}
+    pace_n = {t: len(g) for t, g in poss.items()}
+    league_pace = statistics.mean(pace.values()) if pace else 1.0
+    return {
+        "rate": rate, "home_edge": edge, "dvp": dvp, "dvp_rank": ranks, "teams": len(dvp),
+        "pace": pace, "pace_n": pace_n, "league_pace": league_pace,
+    }
 
 
-def _ewma(values, alpha=0.4):
+def pace_factor(ctx, team, opp):
+    """Expected possessions in this game relative to an average game."""
+    if not PACE_STRENGTH or team not in ctx["pace"] or opp not in ctx["pace"]:
+        return 1.0
+    lp = ctx["league_pace"]
+
+    def rel(t):
+        n = ctx["pace_n"][t]
+        return 1 + (ctx["pace"][t] / lp - 1) * n / (n + 4)
+
+    expected = (rel(team) + rel(opp)) / 2
+    return 1 + PACE_STRENGTH * (expected - 1)
+
+
+def _ewma(values, alpha=None):
+    alpha = EWMA_ALPHA if alpha is None else alpha
     if not values:
         return None
     w, tot, acc = 1.0, 0.0, 0.0
@@ -277,7 +313,7 @@ def project(players, logs, domestic, games, rnd, cutoff, injuries=None):
             minutes = m_el
             if recent_dom:
                 m_dom = statistics.mean(d["min"] for d in recent_dom)
-                minutes = 0.8 * minutes + 0.2 * m_dom
+                minutes = (1 - DOMESTIC_MIN_SHARE) * minutes + DOMESTIC_MIN_SHARE * m_dom
             if missed >= 2:
                 minutes *= 0.5
                 reasons.append(f"Has sat out the last {missed} EuroLeague games")
@@ -314,6 +350,7 @@ def project(players, logs, domestic, games, rnd, cutoff, injuries=None):
         # --- matchup and venue
         dvp, dvp_games = ctx["dvp"].get(opp["code"], {}).get(p["pos"], (1.0, 0))
         venue = ctx["home_edge"] if is_home else 1 / ctx["home_edge"]
+        pace = pace_factor(ctx, p["team"], opp["code"])
 
         # --- availability
         inj = injuries.get(p["key"])
@@ -338,6 +375,7 @@ def project(players, logs, domestic, games, rnd, cutoff, injuries=None):
                 "dvp": dvp,
                 "dvp_games": dvp_games,
                 "venue": venue,
+                "pace": pace,
                 "avail": avail,
                 "inj": inj,
                 "missed": missed,
@@ -377,7 +415,7 @@ def project(players, logs, domestic, games, rnd, cutoff, injuries=None):
     for r in rows:
         p = r["p"]
         minutes = min(r["minutes"], 34.0)
-        proj = minutes * r["rate"] * r["dvp"] * r["venue"] * r["avail"]
+        proj = minutes * r["rate"] * r["dvp"] * r["venue"] * r["pace"] * r["avail"] * CALIBRATION
         el = r["el"]
         pirs = [x["pir"] for x in el]
         season = statistics.mean(pirs) if pirs else None
@@ -447,6 +485,7 @@ def project(players, logs, domestic, games, rnd, cutoff, injuries=None):
                 "dvp": round(r["dvp"], 3),
                 "dvp_rank": ctx["dvp_rank"].get((r["opp"]["code"], p["pos"])),
                 "venue": round(r["venue"], 3),
+                "pace": round(r["pace"], 3),
                 "status": r["inj"]["status"] if r["inj"] else ("Injured" if p["injured_flag"] else None),
                 "severity": r["inj"]["severity"] if r["inj"] else (2 if p["injured_flag"] else None),
                 "feiq_proj": p["feiq_proj"],
@@ -556,12 +595,17 @@ def backtest(players, logs, domestic, games, min_round=4):
         cutoff = first_tip(games, rnd)
         rows, _ = project(players, logs, domestic, games, rnd, cutoff)
         actual = {(r["key"], r["team"]): r["pir"] for r in logs if r["round"] == rnd}
+        others = defaultdict(list)  # every other game of the season, past and future
+        for r in logs:
+            if r["round"] != rnd:
+                others[(r["key"], r["team"])].append(r["pir"])
         pairs = []
         for r in rows:
-            a = actual.get((r["key"], r["team"]))
-            if a is None or r["season"] is None:
+            ident = (r["key"], r["team"])
+            a = actual.get(ident)
+            if a is None or r["season"] is None or not others.get(ident):
                 continue
-            pairs.append((r["proj"], r["season"], r["l3"], a))
+            pairs.append((r["proj"], r["season"], r["l3"], a, statistics.mean(others[ident])))
         if len(pairs) < 30:
             continue
 
@@ -583,6 +627,7 @@ def backtest(players, logs, domestic, games, min_round=4):
             {
                 "round": rnd,
                 "players": len(pairs),
+                "hindsight": {"mae": round(statistics.mean(abs(x[4] - x[3]) for x in pairs), 2)},
                 "model": {"mae": round(mae(0), 2), "corr": round(corr(0), 3), "top20": round(top_actual(0), 1)},
                 "season": {"mae": round(mae(1), 2), "corr": round(corr(1), 3), "top20": round(top_actual(1), 1)},
                 "last3": {"mae": round(mae(2), 2), "corr": round(corr(2), 3), "top20": round(top_actual(2), 1)},
@@ -594,4 +639,5 @@ def backtest(players, logs, domestic, games, min_round=4):
             summary[k] = {
                 m: round(statistics.mean(r[k][m] for r in results), 3 if m == "corr" else 2) for m in ("mae", "corr", "top20")
             }
+        summary["hindsight"] = {"mae": round(statistics.mean(r["hindsight"]["mae"] for r in results), 2)}
     return {"rounds": results, "summary": summary}

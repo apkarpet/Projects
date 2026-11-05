@@ -197,6 +197,7 @@ def box_score(season, game):
                     "fga": int(s.get("fieldGoalsAttempted2", 0) + s.get("fieldGoalsAttempted3", 0)),
                     "fta": int(s.get("freeThrowsAttempted", 0)),
                     "tov": int(s.get("turnovers", 0)),
+                    "oreb": int(s.get("offensiveRebounds", 0)),
                     "start": bool(s.get("startFive")),
                 }
             )

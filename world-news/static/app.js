@@ -712,7 +712,7 @@ function backtestPanel(bt) {
     <p class="prose">Each finished round was replayed using only what was known before tip-off, then compared with what actually happened.
     The model's average miss is <strong>${fmt(s.model.mae, 2)} PIR</strong> per player, against ${fmt(s.season.mae, 2)} for simply using the season average
     and ${fmt(s.last3.mae, 2)} for the last three games${better ? "" : ", so it is not yet beating the simple baseline"}. Its top 20 projected players went on to average
-    <strong>${fmt(s.model.top20)} PIR</strong>. Single games are noisy: treat the range column seriously.</p>
+    <strong>${fmt(s.model.top20)} PIR</strong>.${s.hindsight ? ` For scale: a predictor allowed to see the future, using each player's average over all his other games this season, misses by ${fmt(s.hindsight.mae, 2)}. Most of what is left is single-game luck that no model can see coming, so treat the range column seriously.` : " Single games are noisy: treat the range column seriously."}</p>
     <div class="tablewrap"><table class="table bt named">
       <thead><tr><th class="l">Round</th><th>Model miss</th><th>Season avg miss</th><th>Last 3 miss</th><th>Model top 20</th><th>Season top 20</th><th>Last 3 top 20</th></tr></thead>
       <tbody>${rows}</tbody>
@@ -787,8 +787,9 @@ function renderPicks() {
         <section class="group">
           <div class="group-head"><h2 class="group-title">How the projection works</h2></div>
           <p class="prose">Projected PIR = projected minutes × PIR per minute × matchup × home or away × availability.
-          Minutes come from recent EuroLeague games (the latest count most), nudged by domestic minutes, plus minutes inherited when a teammate in the rotation has just been ruled out.
-          PIR per minute starts from last season's rate and is updated with every EuroLeague minute this season, with the last three games counting extra and domestic games counting less.
+          Minutes come from recent EuroLeague games (the latest count most), plus minutes inherited when a teammate in the rotation has just been ruled out.
+          PIR per minute starts from last season's rate and is updated with every EuroLeague minute this season; domestic games count 30% as much.
+          The result is scaled by 0.9 because PIR is lopsided: a few huge games pull the average above what a typical night looks like.
           Matchup compares the PIR the opponent allows to guards, forwards or centers with the league average, shrunk towards average while samples are small.
           Doubtful players are scaled to 40%, uncertain ones to 75%, and players ruled out drop to zero.</p>
           <p class="pick-note">Sources: EuroLeague box scores (${src.games} games), domestic box scores and official-game prices from FantasyEdgeIQ (domestic data from ${esc(src.domestic || "n/a")}, prices checked ${

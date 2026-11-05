@@ -540,12 +540,22 @@ function renderTeam() {
 teamState.view = null; // "live" or "plan"
 teamState.live = null;
 teamState.liveLoading = false;
+teamState.liveDraft = null; // lineup being edited for the round in progress
+teamState.liveSel = null;
+teamState.liveSwap = false;
+teamState.liveMsg = "";
+
+const cloneLineup = (l) => JSON.parse(JSON.stringify(l));
+const sameLineup = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 
 async function loadLive() {
   if (teamState.liveLoading) return;
   teamState.liveLoading = true;
   try {
-    teamState.live = (await api("myteam/live")).live;
+    const live = (await api("myteam/live")).live;
+    const editing = teamState.liveDraft && teamState.live && !sameLineup(teamState.liveDraft, teamState.live.lineup);
+    teamState.live = live;
+    if (!editing && live) teamState.liveDraft = cloneLineup(live.lineup); // keep unsaved edits through refreshes
     teamState.liveError = null;
   } catch (e) {
     teamState.liveError = e.message;
@@ -560,46 +570,165 @@ setInterval(() => {
   if (document.visibilityState !== "visible" || state.tab !== "team" || teamState.view !== "live") return;
   const L = teamState.live;
   if (!L || L.done) return;
-  const anyLive = L.players.some((p) => p.state === "in");
   const now = Date.now() / 1000;
-  if (anyLive || L.players.some((p) => p.state === "pre" && p.tip && p.tip < now)) loadLive();
+  if (L.players.some((p) => p.state === "in" || (p.state === "pre" && p.tip && p.tip < now))) loadLive();
 }, 60_000);
 
 function viewSwitch() {
   const L = teamState.live;
   if (!L || L.done) return "";
-  const planRound = state.picks?.round;
   return seg(
     "tview",
     [
       { key: "live", label: `Round ${L.round} now` },
-      { key: "plan", label: `Round ${planRound} plan` },
+      { key: "plan", label: `Round ${state.picks?.round} plan` },
     ],
     teamState.view
   ).replaceAll('data-action="tview"', 'data-taction="view"');
 }
 
+/* roles and rules ------------------------------------------------- */
+
+function liveRole(l, id) {
+  if (l.captain === id) return "captain";
+  if (l.starters.includes(id)) return "starter";
+  return l.sixth === id ? "sixth" : "bench";
+}
+
+const liveMult = { captain: 2, starter: 1, sixth: 1, bench: 0.5 };
+const isFull = (role) => role !== "bench";
+
+function livePlayer(id) {
+  return teamState.live.players.find((p) => p.id === id);
+}
+
+const hasStarted = (id) => ["in", "post"].includes(livePlayer(id)?.state);
+
+/* Why a swap between a and b is not allowed, or "" if it is. */
+function swapProblem(a, b) {
+  const l = teamState.liveDraft;
+  const saved = teamState.live.lineup;
+  const ra = liveRole(l, a);
+  const rb = liveRole(l, b);
+  if (a === b) return "Pick a different player.";
+  if (!isFull(ra) && !isFull(rb)) return "Both are on the bench; swapping them changes nothing.";
+  if (ra === "captain" || rb === "captain") {
+    if (!isFull(ra) || !isFull(rb)) return "Make someone else captain before moving him to the bench.";
+  }
+  for (const [x, rx, ry] of [
+    [a, ra, rb],
+    [b, rb, ra],
+  ]) {
+    // whoever moves into a full-point slot from the bench must not have played yet
+    if (!isFull(rx) && isFull(ry) && hasStarted(x) && !isFull(liveRole(saved, x))) {
+      return `${livePlayer(x).name}'s game has started, so he cannot come off the bench.`;
+    }
+  }
+  return "";
+}
+
+function captainProblem(id) {
+  const l = teamState.liveDraft;
+  const savedCap = teamState.live.lineup.captain;
+  if (!l.starters.includes(id)) return "The captain has to be one of the five starters.";
+  if (id === l.captain) return "He is already captain.";
+  if (hasStarted(savedCap)) return "Your captain has already played, so the captaincy is fixed for this round.";
+  if (hasStarted(id)) return "A new captain must be someone whose game has not started.";
+  return "";
+}
+
+function liveSwap(a, b) {
+  const l = teamState.liveDraft;
+  const slots = [...l.starters, l.sixth, ...l.bench];
+  const ia = slots.indexOf(a);
+  const ib = slots.indexOf(b);
+  [slots[ia], slots[ib]] = [slots[ib], slots[ia]];
+  l.starters = slots.slice(0, 5);
+  l.sixth = slots[5];
+  l.bench = slots.slice(6);
+}
+
+function liveTotals() {
+  const l = teamState.liveDraft;
+  let banked = 0;
+  let live = 0;
+  let toCome = 0;
+  for (const p of teamState.live.players) {
+    const m = liveMult[liveRole(l, p.id)];
+    if (p.state === "post") banked += (p.fp || 0) * m;
+    else if (p.state === "in") live += (p.fp || 0) * m;
+    else toCome += (p.xfp || 0) * m;
+  }
+  return { banked, live, toCome, total: banked + live + toCome };
+}
+
+/* events ------------------------------------------------------------ */
+
 document.addEventListener("click", (e) => {
   const el = e.target.closest("[data-taction]");
   if (!el) return;
-  if (el.dataset.taction === "view") {
-    teamState.view = el.dataset.id;
-    render();
-  } else if (el.dataset.taction === "madesubs") {
-    const s = teamState.live?.subs;
-    if (!s) return;
-    apiPost("myteam/live", { lineup: s.lineup })
+  const action = el.dataset.taction;
+  const id = el.dataset.id;
+  if (action === "view") {
+    teamState.view = id;
+  } else if (action === "lsel") {
+    if (teamState.liveSwap && teamState.liveSel && teamState.liveSel !== id) {
+      const problem = swapProblem(teamState.liveSel, id);
+      if (problem) {
+        teamState.liveMsg = problem;
+      } else {
+        liveSwap(teamState.liveSel, id);
+        teamState.liveMsg = "";
+        teamState.liveSel = null;
+        teamState.liveSwap = false;
+      }
+    } else {
+      teamState.liveSel = teamState.liveSel === id ? null : id;
+      teamState.liveSwap = false;
+      teamState.liveMsg = "";
+    }
+  } else if (action === "lcaptain") {
+    const problem = captainProblem(teamState.liveSel);
+    if (problem) teamState.liveMsg = problem;
+    else {
+      teamState.liveDraft.captain = teamState.liveSel;
+      teamState.liveMsg = "";
+    }
+  } else if (action === "lswap") {
+    teamState.liveSwap = true;
+    teamState.liveMsg = "";
+  } else if (action === "lclose") {
+    teamState.liveSel = null;
+    teamState.liveSwap = false;
+    teamState.liveMsg = "";
+  } else if (action === "lsuggest") {
+    teamState.liveDraft = cloneLineup(teamState.live.subs.lineup);
+    teamState.liveSel = null;
+    teamState.liveSwap = false;
+    teamState.liveMsg = "Suggested subs filled in. Check them, then press Save subs.";
+  } else if (action === "lundo") {
+    teamState.liveDraft = cloneLineup(teamState.live.lineup);
+    teamState.liveSel = null;
+    teamState.liveSwap = false;
+    teamState.liveMsg = "";
+  } else if (action === "lsave") {
+    apiPost("myteam/live", { lineup: teamState.liveDraft })
       .then((d) => {
         teamState.live = d.live;
-        teamState.liveMsg = "Lineup updated with these subs.";
+        teamState.liveDraft = cloneLineup(d.live.lineup);
+        teamState.liveMsg = "Subs saved.";
         render();
       })
       .catch((err) => {
-        teamState.liveMsg = `Not updated: ${err.message}`;
+        teamState.liveMsg = `Not saved: ${err.message}`;
         render();
       });
-  }
+    return;
+  } else return;
+  render();
 });
+
+/* rendering --------------------------------------------------------- */
 
 function resultLine(p) {
   if (p.state === "post") {
@@ -615,12 +744,18 @@ function resultLine(p) {
   return `${p.home ? "vs" : "at"} ${esc(p.opp || "")}, ${esc(shortTime(p.tip))}`;
 }
 
-function liveChip(p) {
+function liveChip(id) {
+  const p = livePlayer(id);
+  if (!p) return "";
+  const l = teamState.liveDraft;
+  const role = liveRole(l, id);
+  const mult = liveMult[role];
+  const savedRole = liveRole(teamState.live.lineup, id);
   const crest = state.picks?.teams?.[p.team]?.crest;
-  const multTxt = p.mult === 2 ? " ×2" : p.mult === 0.5 ? " ×½" : "";
+  const multTxt = mult === 2 ? " ×2" : mult === 0.5 ? " ×½" : "";
   let big, small, line;
   if (p.state === "pre") {
-    big = fmt(p.xfp * p.mult);
+    big = fmt(p.xfp * mult);
     small = `expected${multTxt}`;
     line = `${fmt(p.price)} cr${p.status ? ` <span class="st-${p.severity ?? 2}">${esc(p.status)}</span>` : ""}`;
   } else if (!p.played) {
@@ -628,79 +763,123 @@ function liveChip(p) {
     small = p.state === "post" ? "did not play" : "not in yet";
     line = "";
   } else {
-    big = fmt(p.total);
+    big = fmt((p.fp || 0) * mult);
     small = `${p.pir} PIR${p.won ? " +10%" : ""}${multTxt}`;
     line = `${p.pts} pts, ${p.reb} reb, ${p.ast} ast, ${p.min} min`;
   }
-  const cls = ["pchip", "live-chip", `r-${p.role}`, p.state === "post" ? "done" : "", p.state === "in" ? "playing" : "", (p.severity ?? 3) <= 1 && p.state === "pre" ? "doubt" : ""].join(" ");
-  return `<div class="${cls}">
-    ${p.role === "captain" ? `<span class="pc-badge" title="Captain">C</span>` : ""}
+  const sel = teamState.liveSel === id;
+  const target = teamState.liveSwap && teamState.liveSel && !sel;
+  const blocked = target && swapProblem(teamState.liveSel, id);
+  const moved = role !== savedRole;
+  const cls = [
+    "pchip",
+    "live-chip",
+    `r-${role}`,
+    p.state === "post" ? "done" : "",
+    p.state === "in" ? "playing" : "",
+    (p.severity ?? 3) <= 1 && p.state === "pre" ? "doubt" : "",
+    sel ? "selected" : "",
+    target && !blocked ? "swappable" : "",
+    blocked ? "blocked" : "",
+    moved ? "moved" : "",
+  ].join(" ");
+  return `<button type="button" class="${cls}" data-taction="lsel" data-id="${esc(id)}" aria-pressed="${sel}" ${blocked ? `title="${esc(blocked)}"` : ""}>
+    ${role === "captain" ? `<span class="pc-badge" title="Captain">C</span>` : ""}
     <span class="pc-top">${crest ? `<img src="${esc(crest)}" alt="" width="18" height="18">` : ""}<span class="pc-pos">${p.pos || ""}</span></span>
     <span class="pc-name">${esc(lastName(p.name))}</span>
     <span class="pc-meta">${resultLine(p)}</span>
     <span class="pc-pts">${big}<small> ${small}</small></span>
     <span class="pc-price">${line}</span>
-  </div>`;
+  </button>`;
 }
 
 function liveCourt(L) {
-  const by = new Map(L.players.map((p) => [p.id, p]));
+  const l = teamState.liveDraft;
   const order = { G: 0, F: 1, C: 2 };
-  const starters = [...L.lineup.starters].sort((a, b) => (order[by.get(a)?.pos] ?? 1) - (order[by.get(b)?.pos] ?? 1));
-  const spots = starters.map((id, i) => `<div class="spot spot-${i + 1}">${liveChip(by.get(id))}</div>`).join("");
+  const starters = [...l.starters].sort((a, b) => (order[livePlayer(a)?.pos] ?? 1) - (order[livePlayer(b)?.pos] ?? 1));
+  const spots = starters.map((id, i) => `<div class="spot spot-${i + 1}">${liveChip(id)}</div>`).join("");
   const c = L.coach;
-  let coachLine = "";
+  let coachChip = "";
   if (c) {
     const res = c.state === "post" ? `<span class="${c.won ? "up" : "down"}">${c.won ? "Won" : "Lost"}</span>` : c.state === "in" ? `<span class="live">Live</span>` : esc(shortTime(c.tip));
-    coachLine = `<div class="pchip live-chip coach"><span class="pc-top"><span class="pc-pos">Coach</span></span><span class="pc-name">${esc(lastName(c.name || ""))}</span><span class="pc-meta">${
+    coachChip = `<div class="pchip live-chip coach"><span class="pc-top"><span class="pc-pos">Coach</span></span><span class="pc-name">${esc(lastName(c.name || ""))}</span><span class="pc-meta">${
       c.home ? "vs" : "at"
     } ${esc(c.opp || "")}</span><span class="pc-pts" style="font-size:1rem">${res}</span></div>`;
   }
   return `<div class="court-wrap">
     <div class="court">${COURT}${spots}</div>
     <div class="bench">
-      <div class="bench-group"><span class="bench-label">Sixth man</span>${liveChip(by.get(L.lineup.sixth))}</div>
-      <div class="bench-group grow"><span class="bench-label">Bench, half points</span><div class="bench-row">${L.lineup.bench.map((id) => liveChip(by.get(id))).join("")}</div></div>
-      <div class="bench-group"><span class="bench-label">Coach</span>${coachLine}</div>
+      <div class="bench-group"><span class="bench-label">Sixth man</span>${liveChip(l.sixth)}</div>
+      <div class="bench-group grow"><span class="bench-label">Bench, half points</span><div class="bench-row">${l.bench.map((id) => liveChip(id)).join("")}</div></div>
+      <div class="bench-group"><span class="bench-label">Coach</span>${coachChip}</div>
     </div>
   </div>`;
 }
 
-function morningSubsPanel(L) {
-  const by = new Map(L.players.map((p) => [p.id, p]));
+function liveSelectionPanel() {
+  const id = teamState.liveSel;
+  const msg = teamState.liveMsg ? `<p class="team-msg">${esc(teamState.liveMsg)}</p>` : "";
+  if (!id) return `${msg}<p class="pick-note">Select a player to make him captain or swap him with someone else.</p>`;
+  const p = livePlayer(id);
+  if (teamState.liveSwap) {
+    return `<div class="sel-panel"><p class="prose">Now select who ${esc(p.name)} swaps with. Greyed-out players cannot swap with him.</p>${msg}
+      <button type="button" class="text-btn" data-taction="lclose">Cancel</button></div>`;
+  }
+  const role = liveRole(teamState.liveDraft, id);
+  const capProblem = captainProblem(id);
+  const status =
+    p.state === "post"
+      ? `Finished: ${p.played ? `${p.pir} PIR, ${fmt(p.fp)} fantasy points` : "did not play"}.`
+      : p.state === "in"
+      ? `Playing now: ${p.pir ?? 0} PIR so far.`
+      : `Plays ${shortTime(p.tip)}, expected ${fmt(p.xfp)} fantasy points.`;
+  return `<div class="sel-panel">
+    <h3>${esc(p.name)} <span class="muted">${esc(p.team)} ${p.pos || ""}, ${role === "sixth" ? "sixth man" : role}</span></h3>
+    <p class="pick-note">${status}</p>
+    ${msg}
+    <div class="sel-actions">
+      ${role === "starter" ? `<button type="button" class="btn" data-taction="lcaptain" ${capProblem ? `disabled title="${esc(capProblem)}"` : ""}>Make captain</button>` : ""}
+      <button type="button" class="btn" data-taction="lswap">Swap with…</button>
+      <button type="button" class="text-btn" data-taction="lclose">Done</button>
+    </div>
+    ${role === "starter" && capProblem && capProblem !== "He is already captain." ? `<p class="pick-note">${esc(capProblem)}</p>` : ""}
+  </div>`;
+}
+
+function liveSubsPanel(L) {
   const s = L.subs;
-  const name = (id) => esc(by.get(id)?.name || id);
+  const name = (id) => esc(livePlayer(id)?.name || id);
   const day = (ts) => {
     if (!ts) return "";
     const d = new Date(ts * 1000);
-    const today = new Date();
-    return d.toDateString() === today.toDateString() ? "this morning" : `${d.toLocaleDateString("en-GB", { weekday: "long" })} morning`;
+    return d.toDateString() === new Date().toDateString() ? "this morning" : `${d.toLocaleDateString("en-GB", { weekday: "long" })} morning`;
   };
+  const edited = !sameLineup(teamState.liveDraft, L.lineup);
   let body;
-  if (!s.moves.length && !s.captain) body = `<p class="prose">No subs worth making: your full-point slots already hold your best remaining scorers.</p>`;
+  if (!s.moves.length && !s.captain) body = `<p class="prose">No subs worth making for your saved lineup: your full-point slots already hold your best remaining scorers.</p>`;
   else
     body = `${s.moves
       .map(
-        (m) => `<div class="sugg"><div class="sugg-head"><span><span class="muted">Bench</span> ${name(m.out)} <span class="muted">for</span> ${name(m.in)}</span><span class="up strong">+${fmt(
-          m.gain
-        )}</span></div>
-        <div class="sugg-foot"><span class="muted">${by.get(m.out)?.state === "post" ? `${name(m.out)} has finished with ${fmt(by.get(m.out).fp)}. ` : ""}${name(m.in)} is expected to score ${fmt(
-          by.get(m.in)?.xfp
-        )}.</span></div>
-        <p class="pick-note">Decide by ${day(m.by)}.</p></div>`
+        (m) => `<div class="sugg"><div class="sugg-head"><span><span class="muted">Bench</span> ${name(m.out)} <span class="muted">for</span> ${name(m.in)}</span><span class="up strong">+${fmt(m.gain)}</span></div>
+        <p class="pick-note">${livePlayer(m.out)?.state === "post" ? `${name(m.out)} finished with ${fmt(livePlayer(m.out).fp)}. ` : ""}${name(m.in)} is expected to score ${fmt(
+          livePlayer(m.in)?.xfp
+        )}. Decide by ${day(m.by)}.</p></div>`
       )
       .join("")}${s.captain ? `<p class="prose">Make ${name(s.captain)} captain.</p>` : ""}
-      <div class="sel-actions"><button type="button" class="btn" data-taction="madesubs">I made these subs</button></div>`;
+      <div class="sel-actions"><button type="button" class="btn" data-taction="lsuggest">Use suggested subs</button></div>`;
   return `<section class="panel">
-    <div class="panel-head"><h2>Subs for the rest of the round</h2></div>
+    <div class="panel-head"><h2>Suggested subs</h2></div>
+    ${edited ? `<p class="pick-note">These are for your saved lineup. Save your changes to refresh them.</p>` : ""}
     ${body}
-    ${teamState.liveMsg ? `<p class="team-msg">${esc(teamState.liveMsg)}</p>` : ""}
-    <p class="panel-note">A starter whose game is over can go to the bench for a bench player who has not played yet. Bench players whose game has started cannot come in. Swaps worth under 1 point are left out.</p>
+    <p class="panel-note">A starter whose game is over can go to the bench for a bench player who has not played yet. Bench players whose game has started cannot come in. The captain is fixed once he has played. Swaps worth under 1 point are left out.</p>
   </section>`;
 }
 
 function renderLive() {
   const L = teamState.live;
+  if (!teamState.liveDraft) teamState.liveDraft = cloneLineup(L.lineup);
+  const t = liveTotals();
+  const edited = !sameLineup(teamState.liveDraft, L.lineup);
   const playing = L.players.filter((p) => p.state === "in").length;
   return `<div class="picks myteam">
     <div class="picks-head">
@@ -709,16 +888,21 @@ function renderLive() {
         <p class="picks-sub">Round ${L.round}, in progress. Finished games show real points; the rest show what is expected.</p>
       </div>
       ${viewSwitch()}
+      <div class="team-actions">
+        <button type="button" class="btn" data-taction="lundo" ${edited ? "" : "disabled"}>Undo changes</button>
+        <button type="button" class="btn primary" data-taction="lsave" ${edited ? "" : "disabled"}>Save subs</button>
+      </div>
     </div>
     <div class="team-stats">
-      <div><span class="ts-big">${fmt(L.banked)}</span><span class="ts-label">points from finished games</span></div>
-      ${playing ? `<div><span class="ts-big live">${fmt(L.live_now)}</span><span class="ts-label">in ${playing} game${playing > 1 ? "s" : ""} now</span></div>` : ""}
-      <div><span class="ts-big">${fmt(L.to_come)}</span><span class="ts-label">expected from games to come</span></div>
-      <div><span class="ts-big">${fmt(L.projected)}</span><span class="ts-label">projected round total</span></div>
+      <div><span class="ts-big">${fmt(t.banked)}</span><span class="ts-label">points from finished games</span></div>
+      ${playing ? `<div><span class="ts-big live">${fmt(t.live)}</span><span class="ts-label">in ${playing} game${playing > 1 ? "s" : ""} now</span></div>` : ""}
+      <div><span class="ts-big">${fmt(t.toCome)}</span><span class="ts-label">expected from games to come</span></div>
+      <div><span class="ts-big">${fmt(t.total)}</span><span class="ts-label">projected round total${edited ? `, ${t.total >= L.projected ? "+" : ""}${fmt(t.total - L.projected)} vs saved` : ""}</span></div>
     </div>
+    ${edited ? `<p class="team-msg">Unsaved subs. Make the same moves in the official app, then press Save subs.</p>` : ""}
     <div class="layout">
-      <div class="main team-main">${liveCourt(L)}</div>
-      <aside class="rail">${morningSubsPanel(L)}</aside>
+      <div class="main team-main">${liveCourt(L)}${liveSelectionPanel()}</div>
+      <aside class="rail">${liveSubsPanel(L)}</aside>
     </div>
   </div>`;
 }

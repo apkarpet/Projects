@@ -438,14 +438,31 @@ def get_live_team():
 
 
 def save_live_lineup(body):
+    """Save subs for the round in progress, enforcing the official rules:
+    a bench player whose game has started cannot come in, and the captain
+    is fixed once his game has started (a new captain must not have played)."""
     team = load_team()
     if not team or not team.get("live"):
         raise ValueError("No live lineup saved")
     l = body.get("lineup") or {}
-    ids = list(l.get("starters", [])) + [l.get("sixth")] + list(l.get("bench", []))
-    if sorted(ids) != sorted(team["players"]) or l.get("captain") not in l.get("starters", []):
-        raise ValueError("The lineup must use your ten players with the captain among the starters")
-    team["live"]["lineup"] = {"captain": l["captain"], "starters": l["starters"], "sixth": l["sixth"], "bench": l["bench"]}
+    starters, sixth, bench, cap = list(l.get("starters", [])), l.get("sixth"), list(l.get("bench", [])), l.get("captain")
+    ids = starters + [sixth] + bench
+    if len(starters) != 5 or len(bench) != 4 or sorted(ids) != sorted(team["players"]) or cap not in starters:
+        raise ValueError("Use your ten players: five starters including the captain, a sixth man and four on the bench")
+    current = get_live_team()["live"]
+    old = current["lineup"]
+    started = {p["id"]: p["state"] in ("in", "post") for p in current["players"]}
+    old_full = set(old["starters"]) | {old["sixth"]}
+    for i in starters + [sixth]:
+        if started.get(i) and i not in old_full:
+            name = next((p["name"] for p in current["players"] if p["id"] == i), i)
+            raise ValueError(f"{name}'s game has started, so he cannot come off the bench")
+    if cap != old["captain"]:
+        if started.get(old["captain"]):
+            raise ValueError("Your captain has already played, so the captaincy is fixed for this round")
+        if started.get(cap):
+            raise ValueError("A new captain must be someone whose game has not started")
+    team["live"]["lineup"] = {"captain": cap, "starters": starters, "sixth": sixth, "bench": bench}
     tmp = TEAM_PATH + ".tmp"
     with open(tmp, "w") as f:
         json.dump(team, f, indent=1)

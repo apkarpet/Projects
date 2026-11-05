@@ -909,10 +909,14 @@ kbd {
   .ts-big { font-size: 1.5rem; }
 }
 .live-chip { cursor: default; }
-.live-chip:hover { background: var(--surface); }
+.live-chip.coach:hover { background: var(--surface); }
 .live-chip.done { border-width: 2px; }
 .live-chip.playing { border-color: var(--live); }
 .ts-big.live { color: var(--live); }
 .wc { min-width: 560px; }
 .coach-t th:first-child, .coach-t td:first-child { width: auto; color: inherit; }
 .coach-t td:nth-child(2) { white-space: nowrap; }
+.live-chip { cursor: pointer; }
+.live-chip.coach { cursor: default; }
+.pchip.blocked { opacity: 0.35; cursor: not-allowed; }
+.pchip.moved { box-shadow: 0 0 0 2px var(--accent); }

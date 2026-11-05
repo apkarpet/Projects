@@ -299,9 +299,9 @@ function coachChip(coaches) {
 const COURT = `<svg class="court-lines" viewBox="0 0 500 420" preserveAspectRatio="none" aria-hidden="true">
   <rect x="2" y="2" width="496" height="416" />
   <path d="M30 418 V330 A220 220 0 0 1 470 330 V418" />
-  <rect x="190" y="250" width="120" height="168" />
+  <rect class="paint" x="190" y="250" width="120" height="168" />
   <path d="M190 250 A60 60 0 0 1 310 250" />
-  <circle cx="250" cy="392" r="8" />
+  <circle class="rim" cx="250" cy="392" r="8" />
   <line x1="222" y1="404" x2="278" y2="404" />
   <path d="M190 2 A60 60 0 0 0 310 2" />
 </svg>`;

@@ -604,10 +604,13 @@ function livePlayer(id) {
 
 const hasStarted = (id) => ["in", "post"].includes(livePlayer(id)?.state);
 
+/* The lineup at the last tip-off: the rules are judged against it, so changes since then can be undone. */
+const checkpoint = () => teamState.live.checkpoint || teamState.live.lineup;
+
 /* Why a swap between a and b is not allowed, or "" if it is. */
 function swapProblem(a, b) {
   const l = teamState.liveDraft;
-  const saved = teamState.live.lineup;
+  const base = checkpoint();
   const ra = liveRole(l, a);
   const rb = liveRole(l, b);
   if (a === b) return "Pick a different player.";
@@ -620,8 +623,9 @@ function swapProblem(a, b) {
     [b, rb, ra],
   ]) {
     // whoever moves into a full-point slot from the bench must not have played yet
-    if (!isFull(rx) && isFull(ry) && hasStarted(x) && !isFull(liveRole(saved, x))) {
-      return `${livePlayer(x).name}'s game has started, so he cannot come off the bench.`;
+    // unless he held one when the last game tipped off
+    if (!isFull(rx) && isFull(ry) && hasStarted(x) && !isFull(liveRole(base, x))) {
+      return `${livePlayer(x).name}'s game started while he was on the bench, so he cannot come in.`;
     }
   }
   return "";
@@ -631,7 +635,7 @@ function captainProblem(id) {
   const l = teamState.liveDraft;
   if (!l.starters.includes(id)) return "The captain has to be one of the five starters.";
   if (id === l.captain) return "He is already captain.";
-  if (hasStarted(id)) return "A new captain must be someone whose game has not started.";
+  if (hasStarted(id) && id !== checkpoint().captain) return "A new captain must be someone whose game has not started.";
   return "";
 }
 
@@ -705,10 +709,13 @@ document.addEventListener("click", (e) => {
     teamState.liveSwap = false;
     teamState.liveMsg = "Suggested subs filled in. Check them, then press Save subs.";
   } else if (action === "lundo") {
-    teamState.liveDraft = cloneLineup(teamState.live.lineup);
+    // back to the lineup at the last tip-off: everything changed since can be undone until the next game starts
+    teamState.liveDraft = cloneLineup(checkpoint());
     teamState.liveSel = null;
     teamState.liveSwap = false;
-    teamState.liveMsg = "";
+    teamState.liveMsg = sameLineup(teamState.liveDraft, teamState.live.lineup)
+      ? ""
+      : "Back to your lineup at the last tip-off. Make the same moves in the official app, then press Save subs.";
   } else if (action === "lsave") {
     apiPost("myteam/live", { lineup: teamState.liveDraft })
       .then((d) => {
@@ -852,6 +859,7 @@ function liveSubsPanel(L) {
     const d = new Date(ts * 1000);
     return d.toDateString() === new Date().toDateString() ? "this morning" : `${d.toLocaleDateString("en-GB", { weekday: "long" })} morning`;
   };
+  const when = (ts) => (ts ? esc(shortTime(ts)) : "");
   const edited = !sameLineup(teamState.liveDraft, L.lineup);
   let body;
   if (!s.moves.length && !s.captain) body = `<p class="prose">No subs worth making for your saved lineup: your full-point slots already hold your best remaining scorers.</p>`;
@@ -859,16 +867,22 @@ function liveSubsPanel(L) {
     body = `${s.moves
       .map(
         (m) => `<div class="sugg"><div class="sugg-head"><span><span class="muted">Bench</span> ${name(m.out)} <span class="muted">for</span> ${name(m.in)}</span><span class="up strong">+${fmt(m.gain)}</span></div>
-        <p class="pick-note">${livePlayer(m.out)?.state === "post" ? `${name(m.out)} finished with ${fmt(livePlayer(m.out).fp)}. ` : ""}${name(m.in)} is expected to score ${fmt(
-          livePlayer(m.in)?.xfp
-        )}. Decide by ${day(m.by)}.</p></div>`
+        <p class="pick-note">${livePlayer(m.out)?.state === "post" ? `${name(m.out)} finished with ${fmt(livePlayer(m.out).fp)}. ` : ""}${
+          m.back
+            ? `${name(m.in)} scored ${fmt(livePlayer(m.in)?.fp)} and was in your lineup when his game started, so he can go back in. Decide before the next game, ${when(m.by)}.`
+            : `${name(m.in)} is expected to score ${fmt(livePlayer(m.in)?.xfp)}. Decide by ${day(m.by)}.`
+        }</p></div>`
       )
       .join("")}${
         s.captain
           ? `<div class="sugg"><div class="sugg-head"><span><span class="muted">Captain</span> ${name(L.lineup.captain)} <span class="muted">to</span> ${name(s.captain)}</span></div>
         <p class="pick-note">${livePlayer(L.lineup.captain)?.state === "post" ? `${name(L.lineup.captain)} finished with ${fmt(livePlayer(L.lineup.captain).fp)}. ` : ""}${name(
           s.captain
-        )} is expected to score ${fmt(livePlayer(s.captain)?.xfp)}. Decide by ${day(s.captain_by)}.</p></div>`
+        )} ${
+          s.captain_back
+            ? `scored ${fmt(livePlayer(s.captain)?.fp)} and was captain when his game started, so he can be again. Decide before the next game, ${when(s.captain_by)}.`
+            : `is expected to score ${fmt(livePlayer(s.captain)?.xfp)}. Decide by ${day(s.captain_by)}.`
+        }</p></div>`
           : ""
       }
       <div class="sel-actions"><button type="button" class="btn" data-taction="lsuggest">Use suggested subs</button></div>`;
@@ -876,7 +890,7 @@ function liveSubsPanel(L) {
     <div class="panel-head"><h2>Suggested subs</h2></div>
     ${edited ? `<p class="pick-note">These are for your saved lineup. Save your changes to refresh them.</p>` : ""}
     ${body}
-    <p class="panel-note">A starter whose game is over can go to the bench for a bench player who has not played yet. Bench players whose game has started cannot come in. The captain can change every gameday, even after he has played, but only to a starter who has not played yet; the old captain then counts ×1. Swaps worth under 1 point are left out.</p>
+    <p class="panel-note">A starter whose game is over can go to the bench for a bench player who has not played yet. Bench players whose game has started cannot come in. The captain can change every gameday, even after he has played, but only to a starter who has not played yet; the old captain then counts ×1. Until the next game starts you can undo anything changed since the last one, so a player you just benched, or a captain you just replaced, can go back. Swaps worth under 1 point are left out.</p>
   </section>`;
 }
 
@@ -894,7 +908,7 @@ function renderLive() {
       </div>
       ${viewSwitch()}
       <div class="team-actions">
-        <button type="button" class="btn" data-taction="lundo" ${edited ? "" : "disabled"}>Undo changes</button>
+        <button type="button" class="btn" data-taction="lundo" ${sameLineup(teamState.liveDraft, checkpoint()) ? "disabled" : ""} title="Go back to your lineup when the last game tipped off, captain and subs included">Undo changes</button>
         <button type="button" class="btn primary" data-taction="lsave" ${edited ? "" : "disabled"}>Save subs</button>
       </div>
     </div>

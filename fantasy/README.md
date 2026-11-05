@@ -14,7 +14,7 @@ It needs Python 3.11+ with numpy and scipy. Press `1` to `4` to switch tabs and 
 ## Tabs
 
 - **My team**:
-  - **Live round:** while a round is being played, your lineup is on a court with real points for finished games (PIR, +10% for a win, then the slot multiplier), live scores, and expected points for games to come. It also suggests morning subs that follow the official rules, including a captain change between gamedays (even after your captain has played, to a starter who has not), and says by which morning to make each one.
+  - **Live round:** while a round is being played, your lineup is on a court with real points for finished games (PIR, +10% for a win, then the slot multiplier), live scores, and expected points for games to come. It also suggests morning subs that follow the official rules, including a captain change between gamedays (even after your captain has played, to a starter who has not), and says by which morning to make each one. Until the next game tips off you can undo anything changed since the last one (bring back a player who played or a captain you replaced); "Undo changes" takes you back to the lineup at the last tip-off.
   - **Next round:** plan transfers on the court. Click a player to make him captain, swap him or sell him. Suggestions are the mathematically best team for 1 to 4 transfers, or a full rebuild in unlimited rounds, each checked by simulating the round 4,000 times with daily subs.
   - Plan here, make the same moves in the official app, then press Save. The team is kept in `~/.local/share/fantasy/my-team.json`.
 - **Picks**:

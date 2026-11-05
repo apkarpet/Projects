@@ -331,6 +331,19 @@ def live_box(season, game):
     return cache.get(f"boxlive:{season}:{game['id']}", 60, lambda: fantasy.box_score(season, game))
 
 
+def checkpoint_lineup(live, last_tip):
+    """The lineup as it stood when the last game tipped off. The official
+    rules are judged against it, so anything changed since then can be
+    undone until the next game starts. Saves are kept with their time in
+    live["history"]; a round saved before that existed falls back to the
+    current lineup."""
+    history = live.get("history") or []
+    if last_tip is None or not history:
+        return live["lineup"]
+    before = [h for h in history if h["at"] <= last_tip]
+    return (before[-1] if before else history[0])["lineup"]
+
+
 def get_live_team():
     """The saved lineup for a round in progress, scored game by game."""
     team = load_team()
@@ -420,12 +433,16 @@ def get_live_team():
             "won": ((g.get("winner") == "home") == bool(home)) if g and g["state"] == "post" else None,
             "score": [g["home"]["score"], g["away"]["score"]] if g and g["state"] != "pre" else None,
         }
-    subs = picks.gameday_subs(lineup, entries)
+    last_tip = max((r["tip"] for r in rows if r["state"] in ("in", "post") and r["tip"]), default=None)
+    checkpoint = checkpoint_lineup(live, last_tip)
+    subs = picks.gameday_subs(lineup, entries, base=checkpoint)
     next_tip = min((r["tip"] for r in rows if r["state"] == "pre" and r["tip"]), default=None)
     return {
         "live": {
             "round": rnd,
             "lineup": lineup,
+            "checkpoint": checkpoint,
+            "last_tip": last_tip,
             "players": rows,
             "coach": coach,
             "banked": round(banked, 1),
@@ -440,9 +457,12 @@ def get_live_team():
 
 
 def save_live_lineup(body):
-    """Save subs for the round in progress, enforcing the official rules:
-    a bench player whose game has started cannot come in, and the captain
-    can change between gamedays, but only to someone who has not played."""
+    """Save subs for the round in progress, enforcing the official rules
+    against the lineup as it stood at the last tip-off: a player whose game
+    has started can only hold a full-point slot if he held one then, and can
+    only be captain if he was captain then. So the captain can change
+    between gamedays to someone who has not played, and any change since
+    the last game can be undone until the next one starts."""
     team = load_team()
     if not team or not team.get("live"):
         raise ValueError("No live lineup saved")
@@ -452,16 +472,24 @@ def save_live_lineup(body):
     if len(starters) != 5 or len(bench) != 4 or sorted(ids) != sorted(team["players"]) or cap not in starters:
         raise ValueError("Use your ten players: five starters including the captain, a sixth man and four on the bench")
     current = get_live_team()["live"]
-    old = current["lineup"]
+    base = current["checkpoint"]
     started = {p["id"]: p["state"] in ("in", "post") for p in current["players"]}
-    old_full = set(old["starters"]) | {old["sixth"]}
+    base_full = set(base["starters"]) | {base["sixth"]}
     for i in starters + [sixth]:
-        if started.get(i) and i not in old_full:
+        if started.get(i) and i not in base_full:
             name = next((p["name"] for p in current["players"] if p["id"] == i), i)
-            raise ValueError(f"{name}'s game has started, so he cannot come off the bench")
-    if cap != old["captain"] and started.get(cap):
+            raise ValueError(f"{name}'s game started while he was on the bench, so he cannot come in")
+    if cap != base["captain"] and started.get(cap):
         raise ValueError("A new captain must be someone whose game has not started")
-    team["live"]["lineup"] = {"captain": cap, "starters": starters, "sixth": sixth, "bench": bench}
+    live = team["live"]
+    now = time.time()
+    history = live.get("history") or [{"at": 0, "lineup": live["lineup"]}]
+    # only the lineup in effect at the last tip-off and later saves still matter
+    cut = current["last_tip"] or 0
+    keep_from = max((k for k, h in enumerate(history) if h["at"] <= cut), default=0)
+    history = history[keep_from:]
+    live["lineup"] = {"captain": cap, "starters": starters, "sixth": sixth, "bench": bench}
+    live["history"] = history + [{"at": now, "lineup": live["lineup"]}]
     tmp = TEAM_PATH + ".tmp"
     with open(tmp, "w") as f:
         json.dump(team, f, indent=1)

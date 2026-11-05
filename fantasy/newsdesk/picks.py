@@ -61,6 +61,7 @@ SAME_POS_SHARE = 0.55  # share of an injured player's minutes going to his posit
 ROTATION_SHARE = 0.2  # share spread across the whole rotation
 WIN_BONUS = 0.10  # official game: +10% PIR when the player's team wins
 SLOTS = {"captain": 2.0, "starter": 1.0, "sixth": 1.0, "bench": 0.5}  # official multipliers
+FULL_SLOTS = 6  # captain, four starters and the sixth man
 HOME_EDGE_POINTS = 3.0  # home court in points, for win chances
 MARGIN_SD = 11.0  # spread of final margins around the expected one
 RATING_SHRINK = 3  # games before a team's net rating is trusted halfway
@@ -1007,60 +1008,81 @@ def optimize_transfers(roster, info, weighted, budget, max_moves, beam=30, pool_
     return {"base": round(base, 1), "options": out}
 
 
-def gameday_subs(lineup, entries, min_gain=1.0):
+def gameday_subs(lineup, entries, min_gain=1.0, base=None):
     """Best subs for the rest of a round in progress.
 
     entries: id -> {"value": points (actual once his game has started,
     expected before), "locked": True once his game has started, "tip"}.
-    Rules: a starter whose game has started can only move to the bench, a
-    bench player whose game has started cannot come in, and the captain
-    must start. The captain can change between gamedays, even after he has
-    played, but only to a starter who has not played yet; the old captain
-    then counts x1. Swaps worth less than min_gain points are left out
-    because the projections are not that precise."""
-    ones = list(lineup["starters"]) + [lineup["sixth"]]
-    bench = list(lineup["bench"])
+    base: the lineup as it stood when the last game tipped off (defaults to
+    lineup). Changes since then can be undone until the next game starts,
+    so a player whose game has started can hold a full-point slot if he
+    held one in base, and can be captain if he was captain in base. Anyone
+    else whose game has started stays on the bench. The captain can change
+    between gamedays, even after he has played, to a starter who has not
+    played yet; the old captain then counts x1. Swaps worth less than
+    min_gain points are left out because the projections are not that
+    precise."""
+    base = base or lineup
     cap = lineup["captain"]
+    cur_full = set(lineup["starters"]) | {lineup["sixth"]}
+    base_full = set(base["starters"]) | {base["sixth"]}
+    ids = list(lineup["starters"]) + [lineup["sixth"]] + list(lineup["bench"])
     val = lambda i: entries.get(i, {}).get("value", 0.0)
     locked = lambda i: entries.get(i, {}).get("locked", False)
+    tip = lambda i: entries.get(i, {}).get("tip")
+    can_full = lambda i: not locked(i) or i in base_full or i in cur_full
+    can_cap = lambda i: can_full(i) and (not locked(i) or i == base["captain"] or i == cap)
+    next_tip = min((tip(i) for i in ids if not locked(i) and tip(i)), default=None)
+
+    def best_full(c):
+        others = sorted((i for i in ids if i != c and can_full(i)), key=lambda i: -val(i))
+        return {c, *others[: FULL_SLOTS - 1]}
+
+    def total(c):
+        full = best_full(c)
+        return val(c) + sum(val(i) for i in full) + 0.5 * sum(val(i) for i in ids if i not in full)
 
     # a played captain is worth his real score, so he is only replaced by
     # someone expected to beat it
-    new_cap = cap
-    starters_open = [i for i in lineup["starters"] if not locked(i) and i != cap]
-    best = max(starters_open, key=val, default=None)
-    if best is not None and val(best) > val(cap) + min_gain:
-        new_cap = best
+    best = max((i for i in ids if can_cap(i)), key=total)
+    new_cap = best if total(best) > total(cap) + min_gain else cap
 
-    # pair the weakest full-point players with the strongest bench players who can still come in
-    out_pool = sorted((i for i in ones if i != new_cap), key=val)
-    in_pool = sorted((i for i in bench if not locked(i)), key=lambda i: -val(i))
+    # pair the weakest full-point players with the strongest bench players who can come in
+    target = best_full(new_cap)
+    out_pool = sorted(cur_full - target, key=val)
+    in_pool = sorted(target - cur_full, key=lambda i: -val(i))
     moves = []
     for out, inn in zip(out_pool, in_pool):
         gain = 0.5 * (val(inn) - val(out))
-        if gain < min_gain:
-            break
-        # decide before the first of the two games that has not started yet
-        tips = [entries.get(i, {}).get("tip") for i in (out, inn) if not locked(i)]
-        tips = [t for t in tips if t]
-        moves.append({"out": out, "in": inn, "gain": round(gain, 1), "by": min(tips) if tips else None})
+        if gain < min_gain and inn != new_cap:
+            continue
+        # decide before the first of the two games that has not started yet; bringing
+        # back someone who has played only works until the next game starts
+        tips = [tip(i) for i in (out, inn) if not locked(i) and tip(i)]
+        if locked(inn) and next_tip:
+            tips.append(next_tip)
+        moves.append({"out": out, "in": inn, "gain": round(gain, 1), "by": min(tips) if tips else None, "back": locked(inn)})
 
     starters = list(lineup["starters"])
     sixth = lineup["sixth"]
-    bench_new = list(bench)
+    bench_new = list(lineup["bench"])
     for m in moves:
         if m["out"] in starters:
             starters[starters.index(m["out"])] = m["in"]
         else:
             sixth = m["in"]
         bench_new[bench_new.index(m["in"])] = m["out"]
+    if new_cap == sixth:  # the captain must start; starters and sixth man both count x1
+        swap = min(starters, key=val)
+        starters[starters.index(swap)], sixth = new_cap, swap
     gain = sum(m["gain"] for m in moves)
     if new_cap != cap:
         gain += val(new_cap) - val(cap)
     return {
         "moves": moves,
         "captain": new_cap if new_cap != cap else None,
-        "captain_by": entries.get(new_cap, {}).get("tip") if new_cap != cap else None,
+        "captain_by": (next_tip if locked(new_cap) else tip(new_cap)) if new_cap != cap else None,
+        "captain_back": locked(new_cap) if new_cap != cap else False,
         "gain": round(gain, 1),
         "lineup": {"captain": new_cap, "starters": starters, "sixth": sixth, "bench": bench_new},
     }

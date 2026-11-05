@@ -187,14 +187,23 @@ def box_score(season, game):
                     "key": player_key(raw),
                     "team": team["code"],
                     "crest": team.get("crest"),
+                    "pos": POSITIONS.get((p["player"].get("positionName") or "").lower()),
                     "min": round(s.get("timePlayed", 0) / 60),
+                    "secs": int(s.get("timePlayed", 0)),
                     "pts": int(s.get("points", 0)),
                     "reb": int(s.get("totalRebounds", 0)),
                     "ast": int(s.get("assistances", 0)),
                     "pir": int(s.get("valuation", 0)),
+                    "fga": int(s.get("fieldGoalsAttempted2", 0) + s.get("fieldGoalsAttempted3", 0)),
+                    "fta": int(s.get("freeThrowsAttempted", 0)),
+                    "tov": int(s.get("turnovers", 0)),
+                    "start": bool(s.get("startFive")),
                 }
             )
     return lines
+
+
+POSITIONS = {"guard": "G", "forward": "F", "center": "C"}
 
 
 _BOX_POOL = ThreadPoolExecutor(max_workers=8, thread_name_prefix="box")

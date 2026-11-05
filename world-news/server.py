@@ -16,7 +16,7 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-from newsdesk import fantasy, feeds, markets, sports
+from newsdesk import fantasy, feeds, markets, picks, sports
 from newsdesk.cache import Cache
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
@@ -83,7 +83,7 @@ def get_league(league, force=False):
 
 
 def cached_box(season, game):
-    return cache.get(f"box:{season}:{game['id']}", float("inf"), lambda: fantasy.box_score(season, game))
+    return cache.get(f"box2:{season}:{game['id']}", float("inf"), lambda: fantasy.box_score(season, game))
 
 
 def get_fantasy(force=False):
@@ -105,6 +105,68 @@ def get_fantasy(force=False):
     out["rounds"] = fantasy.round_performers(season, el.get("rounds", []), cached_box)
     out["default"] = el.get("default")
     return out
+
+
+def get_injuries(force=False):
+    cfg = config()
+    return cache.get("fantasy:injuries", 30 * 60, lambda: fantasy.injuries(cfg["injury_report_url"]), force)
+
+
+def get_picks(rnd=None, force=False):
+    """Projected PIR and value per credit for a EuroLeague round."""
+    season = sports.el_season()
+    games = cache.get(
+        f"el:games:{season}",
+        lambda gs: 60 if any(g["state"] == "in" for g in gs) else 10 * 60,
+        lambda: sports.el_games(season),
+        force,
+    )
+    finished = [g for g in games if g["state"] == "post"]
+    list(fantasy._BOX_POOL.map(lambda g: cached_box(season, g), finished))  # fill the cache in parallel
+    logs = picks.el_logs(games, lambda g: cached_box(season, g))
+
+    feiq = cache.get("picks:feiq", 60 * 60, picks.feiq_players, force)
+    try:
+        domestic = cache.get("picks:domestic", 6 * 3600, picks.feiq_domestic, force)
+    except Exception:  # noqa: BLE001 - projections still work without domestic games
+        domestic = {"games": [], "generated": None}
+    try:
+        inj = get_injuries(force)
+    except Exception:  # noqa: BLE001
+        inj = None
+    injuries = {p["key"]: p for t in (inj or {}).get("teams", []) for p in t["players"]}
+
+    target = picks.next_round(games)
+    rounds = sorted({g["round"] for g in games})
+    rnd = int(rnd) if rnd and int(rnd) in rounds else target
+    rows, ctx = picks.project(feiq["players"], logs, domestic["games"], games, rnd, time.time(), injuries)
+    rows.sort(key=lambda r: -r["proj"])
+
+    done = sum(1 for r in rounds if all(g["state"] == "post" for g in games if g["round"] == r))
+    bt = cache.get(
+        f"picks:backtest:{season}:{done}",
+        float("inf"),
+        lambda: picks.backtest(feiq["players"], logs, domestic["games"], games),
+    )
+    info = picks._team_info(games)
+    return {
+        "round": rnd,
+        "next_round": target,
+        "rounds": [r for r in rounds if target <= r <= target + 2],
+        "lock": picks.first_tip(games, rnd),
+        "players": rows,
+        "lists": picks.suggestions(rows),
+        "coaches": picks.coach_rows(feiq["players"], games, rnd),
+        "teams": info,
+        "context": {"home_edge": round(ctx["home_edge"], 3), "rate": {k: round(v, 3) for k, v in ctx["rate"].items()}},
+        "backtest": bt,
+        "sources": {
+            "prices": cache.fetched_at("picks:feiq"),
+            "domestic": domestic.get("generated"),
+            "injuries": (inj or {}).get("updated"),
+            "games": len(finished),
+        },
+    }
 
 
 def get_markets(force=False):
@@ -137,7 +199,7 @@ def warm_up():
     """Fill the cache in the background right after start-up."""
     jobs = [lambda s=s: get_news(s) for s in config()["sections"]]
     jobs += [lambda lg=lg: get_league(lg) for lg in LEAGUES]
-    jobs += [get_markets, get_fantasy]
+    jobs += [get_markets, get_fantasy, get_picks]
     t0 = time.time()
     threads = [threading.Thread(target=_quiet, args=(j,), daemon=True) for j in jobs]
     for t in threads:
@@ -201,6 +263,8 @@ class Handler(BaseHTTPRequestHandler):
             data = get_fantasy(force)
         elif route == "markets":
             data = get_markets(force)
+        elif route == "picks":
+            data = get_picks(arg, force)
         else:
             data = None
         if data is None:

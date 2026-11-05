@@ -10,7 +10,6 @@ set -euo pipefail
 
 DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
 STATE="${XDG_CACHE_HOME:-$HOME/.cache}/world-news"
-PIDFILE="$STATE/server.pid"
 LOG="$STATE/server.log"
 PORT="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("port", 8420))' "$DIR/config.json")"
 URL="http://localhost:$PORT"
@@ -21,7 +20,7 @@ healthy() { curl -fsS -m 2 "$URL/api/health" >/dev/null 2>&1; }
 start() {
   if healthy; then return 0; fi
   echo "Starting World News on $URL"
-  (cd "$DIR" && setsid nohup python3 "$DIR/server.py" >>"$LOG" 2>&1 & echo $! >"$PIDFILE")
+  (cd "$DIR" && setsid nohup python3 "$DIR/server.py" >>"$LOG" 2>&1 &)
   for _ in $(seq 1 50); do
     healthy && return 0
     sleep 0.2
@@ -32,14 +31,15 @@ start() {
 }
 
 stop() {
-  local pid
-  pid="$(cat "$PIDFILE" 2>/dev/null || true)"
-  if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
-    kill "$pid" && echo "Stopped World News"
+  if pkill -u "$USER" -f "python3 $DIR/server.py" 2>/dev/null; then
+    for _ in $(seq 1 25); do
+      healthy || break
+      sleep 0.2
+    done
+    echo "Stopped World News"
   else
-    pkill -u "$USER" -f "python3 $DIR/server.py" 2>/dev/null && echo "Stopped World News" || echo "World News is not running"
+    echo "World News is not running"
   fi
-  rm -f "$PIDFILE"
 }
 
 open_site() {

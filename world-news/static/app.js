@@ -66,6 +66,7 @@ const store = {
 const SPORT_TABS = [
   { id: "euroleague", title: "EuroLeague", topic: "euroleague", league: "euroleague" },
   { id: "fantasy", title: "Fantasy" },
+  { id: "picks", title: "Picks" },
   { id: "nba", title: "NBA", topic: "nba", league: "nba" },
   { id: "gbl", title: "Greek league", topic: "greek", league: "gbl" },
 ];
@@ -89,6 +90,8 @@ const state = {
   group: {},
   perfRound: null,
   injFilter: store.get("wn.injFilter", "all"),
+  picks: null,
+  pick: { round: null, sort: "proj", dir: -1, pos: "all", max: null, q: "", hideOut: true, open: null },
   injQuery: "",
   baseline: null,
   refreshing: false,
@@ -130,6 +133,7 @@ async function load(kind, arg, fresh = false) {
     if (kind === "news") state.news[arg] = await api(`news/${arg}`, fresh);
     else if (kind === "sports") state.leagues[arg] = await api(`sports/${arg}`, fresh);
     else if (kind === "fantasy") state.fantasy = await api("fantasy", fresh);
+    else if (kind === "picks") state.picks = await api(`picks${arg ? "/" + arg : ""}`, fresh);
     else if (kind === "markets") state.markets = await api("markets", fresh);
     delete state.errors[key];
   } catch (e) {
@@ -145,6 +149,7 @@ function loadAll(fresh = false) {
   for (const lg of ["euroleague", "nba", "gbl"]) jobs.push(load("sports", lg, sportsFresh));
   jobs.push(load("markets", null, fresh && state.tab === "other"));
   jobs.push(load("fantasy", null, sportsFresh));
+  jobs.push(load("picks", state.pick.round, sportsFresh));
   return Promise.all(jobs);
 }
 
@@ -171,7 +176,7 @@ function go(tab, sub) {
 
 function renderMasthead() {
   const now = new Date();
-  $("#date").textContent = now.toLocaleDateString("en-GB", { weekday: "long", day: "numeric", month: "long" });
+  $("#date").textContent = now.toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric", year: "numeric" });
   const h = now.getHours();
   const hello = h < 5 ? "Up late" : h < 12 ? "Good morning" : h < 18 ? "Good afternoon" : "Good evening";
   const name = state.meta?.name;
@@ -533,7 +538,267 @@ function renderSports() {
   const active = SPORT_TABS.some((t) => t.id === state.sub.sports) ? state.sub.sports : "euroleague";
   const nav = subnav(SPORT_TABS, active, "sports");
   const tab = SPORT_TABS.find((t) => t.id === active);
-  return nav + (tab.id === "fantasy" ? renderFantasy() : renderLeague(tab));
+  if (tab.id === "fantasy") return nav + renderFantasy();
+  if (tab.id === "picks") return nav + renderPicks();
+  return nav + renderLeague(tab);
+}
+
+
+/* ================================================================ rendering: picks */
+
+const pid = (r) => `${r.key}|${r.team}`;
+const fmt = (v, d = 1) => (v == null ? "–" : Number(v).toFixed(d));
+const signed = (v, d = 1) => (v > 0 ? `+${v.toFixed(d)}` : v.toFixed(d));
+
+function matchupCell(r) {
+  const pct = Math.round((r.dvp - 1) * 100);
+  const cls = pct >= 4 ? "up" : pct <= -4 ? "down" : "muted";
+  return `<span class="${cls}" title="Opponent ranks #${r.dvp_rank} of 20 for PIR allowed to this position (1 = most generous)">${pct > 0 ? "+" : ""}${pct}%</span>`;
+}
+
+function statusFlag(r) {
+  if (!r.status) return "";
+  return `<span class="flag st-${r.severity ?? 2}">${esc(r.status)}</span>`;
+}
+
+function pickLine(r, i, metric) {
+  const fixture = `${r.home ? "vs" : "at"} ${esc(r.opp)}`;
+  const big = metric === "value" ? `${fmt(r.value, 2)}<small>PIR/cr</small>` : `${fmt(r.proj)}<small>proj</small>`;
+  return `<div class="perf">
+    <span class="rank">${i + 1}</span>
+    <span class="who">${esc(r.name)}<span class="team-code">${esc(r.team)}</span>${statusFlag(r)}</span>
+    <span class="pir">${big}</span>
+    <span class="line">${fixture}, ${fmt(r.price)} cr${metric === "pop" || metric === "fade" ? `, ${fmt(r.popularity)}% own` : ""}${
+      metric === "value" ? `, ${fmt(r.proj)} proj` : ""
+    }</span>
+  </div>`;
+}
+
+function pickList(title, note, keys, by, metric) {
+  const rows = keys.map((k) => by.get(k)).filter(Boolean);
+  return `<section class="pick-list">
+    <h3>${title}</h3>
+    <p class="pick-note">${note}</p>
+    ${rows.length ? rows.map((r, i) => pickLine(r, i, metric)).join("") : `<p class="empty">Nobody fits this round.</p>`}
+  </section>`;
+}
+
+function gameBars(r) {
+  const games = r.games || [];
+  if (!games.length) return `<p class="empty">No games logged yet this season.</p>`;
+  const w = 34, gap = 8, h = 120, top = 18, base = h - 22;
+  const max = Math.max(30, ...games.map((g) => g.pir), r.proj);
+  const y = (v) => base - (Math.max(0, v) / max) * (base - top);
+  const bars = games
+    .map((g, i) => {
+      const x = i * (w + gap);
+      const el = g.comp === "EL";
+      const label = new Date(g.ts * 1000).toLocaleDateString("en-GB", { day: "numeric", month: "short" });
+      return `<g><title>${esc(el ? "EuroLeague" : g.comp)} ${label} vs ${esc(g.opp)}: ${g.pir} PIR in ${g.min} min${g.est ? " (PIR estimated)" : ""}</title>
+        <rect x="${x}" y="${y(g.pir)}" width="${w}" height="${Math.max(1, base - y(g.pir))}" rx="2" class="${el ? "bar-el" : "bar-dom"}"></rect>
+        <text x="${x + w / 2}" y="${y(g.pir) - 4}" class="bar-val">${g.pir}</text>
+        <text x="${x + w / 2}" y="${h - 8}" class="bar-lab">${esc(String(g.opp).slice(0, 3))}</text></g>`;
+    })
+    .join("");
+  const width = games.length * (w + gap) - gap;
+  const py = y(r.proj);
+  return `<svg class="bars" viewBox="0 -2 ${width + 70} ${h + 2}" width="${width + 70}" height="${h + 2}" role="img" aria-label="Last ${games.length} games PIR">
+    ${bars}
+    <line x1="0" x2="${width}" y1="${py}" y2="${py}" class="proj-line"></line>
+    <text x="${width + 6}" y="${py + 4}" class="proj-lab">Proj ${fmt(r.proj)}</text>
+  </svg>
+  <p class="legend"><span class="key key-el"></span>EuroLeague <span class="key key-dom"></span>Domestic league or cup <span class="key key-proj"></span>This projection</p>`;
+}
+
+function pickDetail(r) {
+  const reasons = r.reasons.length ? `<ul class="reasons">${r.reasons.map((x) => `<li>${esc(x)}</li>`).join("")}</ul>` : `<p class="pick-note">No special factors: a straight read of minutes, rate and matchup.</p>`;
+  const facts = [
+    ["Projected minutes", fmt(r.minutes)],
+    ["PIR per minute", fmt(r.rate, 3)],
+    ["Range (±1 sd)", `${fmt(r.floor)} to ${fmt(r.ceil)}`],
+    ["Starts", `${r.starts} of ${r.gp}`],
+    ["Free throws per 40", fmt(r.fta40)],
+    ["Venue factor", `${r.venue > 1 ? "+" : ""}${Math.round((r.venue - 1) * 1000) / 10}%`],
+    ["FantasyEdgeIQ projection", fmt(r.feiq_proj)],
+  ];
+  return `<div class="pick-detail">
+    <div class="pd-chart"><h4>Last games</h4>${gameBars(r)}</div>
+    <div class="pd-why"><h4>Why ${fmt(r.proj)}</h4>${reasons}
+      <dl class="facts">${facts.map(([k, v]) => `<div><dt>${k}</dt><dd>${v}</dd></div>`).join("")}</dl>
+    </div>
+  </div>`;
+}
+
+const PICK_COLS = [
+  ["name", "Player", "l"],
+  ["opp", "Next", "l"],
+  ["price", "Price"],
+  ["proj", "Proj"],
+  ["value", "PIR/cr"],
+  ["minutes", "Min"],
+  ["season", "Season"],
+  ["l3", "Last 3"],
+  ["dom_l3", "Domestic"],
+  ["usage", "Shot share"],
+  ["dvp", "Matchup"],
+  ["popularity", "Owned"],
+];
+
+function picksTable() {
+  const P = state.picks;
+  if (!P) return "";
+  const f = state.pick;
+  const q = f.q.trim().toLowerCase();
+  let rows = P.players.filter(
+    (r) =>
+      (f.pos === "all" || r.pos === f.pos) &&
+      (!f.max || r.price <= f.max + 1e-9) &&
+      (!f.hideOut || !(r.severity === 0 || r.proj === 0)) &&
+      (!q || r.name.toLowerCase().includes(q) || r.team.toLowerCase().includes(q) || r.opp.toLowerCase().includes(q))
+  );
+  const k = f.sort;
+  rows = rows.sort((a, b) => {
+    const va = a[k] ?? -Infinity, vb = b[k] ?? -Infinity;
+    return (typeof va === "string" ? va.localeCompare(vb) : va - vb) * f.dir;
+  });
+  const shown = rows.slice(0, 150);
+  const head = PICK_COLS.map(
+    ([key, label, align]) =>
+      `<th class="${align || ""}" aria-sort="${f.sort === key ? (f.dir > 0 ? "ascending" : "descending") : "none"}"><button type="button" data-action="psort" data-id="${key}">${label}${
+        f.sort === key ? (f.dir > 0 ? " ↑" : " ↓") : ""
+      }</button></th>`
+  ).join("");
+  const body = shown
+    .map((r) => {
+      const id = pid(r);
+      const open = f.open === id;
+      const chg = r.price_change ? `<span class="${r.price_change > 0 ? "up" : "down"} chg">${signed(r.price_change)}</span>` : "";
+      const row = `<tr class="prow${open ? " open" : ""}${(r.severity ?? 3) <= 1 ? " out" : ""}" data-action="popen" data-id="${esc(id)}" tabindex="0" aria-expanded="${open}">
+        <td class="l"><span class="strong">${esc(r.name)}</span> <span class="muted">${esc(r.team)} ${r.pos}</span>${statusFlag(r)}</td>
+        <td class="l muted">${r.home ? "vs" : "at"} ${esc(r.opp)}</td>
+        <td>${fmt(r.price)}${chg}</td>
+        <td class="strong">${fmt(r.proj)}</td>
+        <td>${fmt(r.value, 2)}</td>
+        <td>${fmt(r.minutes)}</td>
+        <td>${fmt(r.season)}</td>
+        <td>${fmt(r.l3)}</td>
+        <td class="muted">${r.dom_l3 == null ? "–" : fmt(r.dom_l3) + (r.dom_est ? "*" : "")}</td>
+        <td class="muted">${r.usage == null ? "–" : Math.round(r.usage) + "%"}</td>
+        <td>${matchupCell(r)}</td>
+        <td class="muted">${fmt(r.popularity)}%</td>
+      </tr>`;
+      return open ? row + `<tr class="pdrow"><td colspan="${PICK_COLS.length}">${pickDetail(r)}</td></tr>` : row;
+    })
+    .join("");
+  const more = rows.length > shown.length ? `<p class="pick-note">Showing the first 150 of ${rows.length}. Narrow the filters to see the rest.</p>` : "";
+  return `<div class="tablewrap"><table class="table ptable"><thead><tr>${head}</tr></thead><tbody>${
+    body || `<tr><td colspan="${PICK_COLS.length}" class="l muted">No players match these filters.</td></tr>`
+  }</tbody></table></div>${more}`;
+}
+
+function backtestPanel(bt) {
+  if (!bt?.rounds?.length) return "";
+  const s = bt.summary;
+  const better = s.model.mae < s.season.mae;
+  const rows = bt.rounds
+    .map(
+      (r) => `<tr><td class="l">Round ${r.round}</td><td class="strong">${fmt(r.model.mae, 2)}</td><td>${fmt(r.season.mae, 2)}</td><td>${fmt(r.last3.mae, 2)}</td><td class="strong">${fmt(
+        r.model.top20
+      )}</td><td>${fmt(r.season.top20)}</td><td>${fmt(r.last3.top20)}</td></tr>`
+    )
+    .join("");
+  return `<section class="group">
+    <div class="group-head"><h2 class="group-title">How accurate is this?</h2></div>
+    <p class="prose">Each finished round was replayed using only what was known before tip-off, then compared with what actually happened.
+    The model's average miss is <strong>${fmt(s.model.mae, 2)} PIR</strong> per player, against ${fmt(s.season.mae, 2)} for simply using the season average
+    and ${fmt(s.last3.mae, 2)} for the last three games${better ? "" : ", so it is not yet beating the simple baseline"}. Its top 20 projected players went on to average
+    <strong>${fmt(s.model.top20)} PIR</strong>. Single games are noisy: treat the range column seriously.</p>
+    <div class="tablewrap"><table class="table bt named">
+      <thead><tr><th class="l">Round</th><th>Model miss</th><th>Season avg miss</th><th>Last 3 miss</th><th>Model top 20</th><th>Season top 20</th><th>Last 3 top 20</th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table></div>
+    <p class="pick-note">Miss is the mean absolute error in PIR. "Top 20" is the average actual PIR of each method's 20 highest projections. Injuries are not replayed, so live projections should do a little better.</p>
+  </section>`;
+}
+
+function coachPanel(coaches) {
+  if (!coaches?.length) return "";
+  const rows = coaches
+    .slice(0, 8)
+    .map(
+      (c) => `<tr><td class="l"><span class="strong">${esc(c.name)}</span> <span class="muted">${esc(c.team)}</span></td><td class="l muted">${c.home ? "vs" : "at"} ${esc(c.opp)}</td><td>${fmt(
+        c.price
+      )}</td><td class="strong">${c.win}%</td><td class="muted">${fmt(c.popularity)}%</td></tr>`
+    )
+    .join("");
+  return `<section class="panel">
+    <div class="panel-head"><h2>Coaches</h2></div>
+    <table class="table named"><thead><tr><th class="l">Coach</th><th class="l">Next</th><th>Price</th><th>Win</th><th>Owned</th></tr></thead><tbody>${rows}</tbody></table>
+    <p class="panel-note">Coaches score on results, so they are ranked by win chance from this season's point margins plus home court.</p>
+  </section>`;
+}
+
+function renderPicks() {
+  const P = state.picks;
+  if (!P) {
+    const err = state.errors[`picks:${state.pick.round}`] || state.errors.picks;
+    return `<div class="picks">${err ? errorBox("Pick suggestions", err) : `<p class="pick-note">Crunching every box score of the season. The first load takes a few seconds.</p>${skeleton(8)}`}</div>`;
+  }
+  const by = new Map(P.players.map((r) => [pid(r), r]));
+  const prices = P.players.map((r) => r.price);
+  const maxPrice = Math.max(...prices);
+  if (state.pick.max == null) state.pick.max = maxPrice;
+  const lock = P.lock ? new Date(P.lock * 1000).toLocaleString("en-GB", { weekday: "long", day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" }) : "";
+  const roundSwitch = P.rounds.length > 1 ? seg("pround", P.rounds.map((r) => ({ key: r, label: `Round ${r}` })), P.round) : "";
+  const posSeg = seg("ppos", [{ key: "all", label: "All" }, { key: "G", label: "Guards" }, { key: "F", label: "Forwards" }, { key: "C", label: "Centers" }], state.pick.pos);
+  const src = P.sources;
+  return `<div class="picks">
+    <div class="picks-head">
+      <div>
+        <h2 class="picks-title">Round ${P.round} picks</h2>
+        <p class="picks-sub">${P.round === P.next_round ? "Lineups lock" : "First tip-off"} ${esc(lock)}. Projected PIR for each player's next EuroLeague game, against his price in credits.</p>
+      </div>
+      ${roundSwitch}
+    </div>
+
+    <div class="pick-lists">
+      ${pickList("Top projected", "Most PIR expected, whatever the price.", P.lists.top, by, "proj")}
+      ${pickList("Best value", "Most projected PIR per credit (9+ PIR).", P.lists.value, by, "value")}
+      ${pickList("Differentials", "12+ PIR projected, owned by under 8% of managers.", P.lists.differentials, by, "pop")}
+      ${pickList("Fades", "Popular picks that are out, doubtful or poor value this round.", P.lists.fades, by, "fade")}
+    </div>
+
+    <section class="group">
+      <div class="group-head"><h2 class="group-title">All players</h2></div>
+      <div class="pick-tools">
+        ${posSeg}
+        <label class="range">Max price <input id="pick-max" type="range" min="4" max="${maxPrice}" step="0.1" value="${state.pick.max}"> <span id="pick-max-label">${fmt(
+    state.pick.max
+  )} cr</span></label>
+        <label class="check"><input id="pick-out" type="checkbox" ${state.pick.hideOut ? "checked" : ""}> Hide players ruled out</label>
+        <input class="search" id="pick-q" type="search" placeholder="Find a player, team or opponent" value="${esc(state.pick.q)}" aria-label="Find a player, team or opponent">
+      </div>
+      <div id="picks-table">${picksTable()}</div>
+      <p class="pick-note">Select a player to see his recent games and the reasons behind his projection. Matchup is how much more (or less) PIR the opponent allows to his position than the league average. Domestic values marked * use PIR estimated without fouls.</p>
+    </section>
+
+    <div class="layout picks-bottom">
+      <div class="main">${backtestPanel(P.backtest)}
+        <section class="group">
+          <div class="group-head"><h2 class="group-title">How the projection works</h2></div>
+          <p class="prose">Projected PIR = projected minutes × PIR per minute × matchup × home or away × availability.
+          Minutes come from recent EuroLeague games (the latest count most), nudged by domestic minutes, plus minutes inherited when a teammate in the rotation has just been ruled out.
+          PIR per minute starts from last season's rate and is updated with every EuroLeague minute this season, with the last three games counting extra and domestic games counting less.
+          Matchup compares the PIR the opponent allows to guards, forwards or centers with the league average, shrunk towards average while samples are small.
+          Doubtful players are scaled to 40%, uncertain ones to 75%, and players ruled out drop to zero.</p>
+          <p class="pick-note">Sources: EuroLeague box scores (${src.games} games), domestic box scores and official-game prices from FantasyEdgeIQ (domestic data from ${esc(src.domestic || "n/a")}, prices checked ${
+    src.prices ? clock(src.prices) : "n/a"
+  }), injuries from BasketNews${src.injuries ? ` (updated ${dayStamp(src.injuries)})` : ""}.</p>
+        </section>
+      </div>
+      <aside class="rail">${coachPanel(P.coaches)}</aside>
+    </div>
+  </div>`;
 }
 
 /* ================================================================ render */
@@ -544,12 +809,14 @@ function render() {
   renderTabs();
   const view = $("#view");
   const focused = document.activeElement?.id;
-  const caret = focused === "inj-search" ? document.activeElement.selectionStart : null;
+  const caret = focused === "inj-search" || focused === "pick-q" ? document.activeElement.selectionStart : null;
   view.innerHTML = state.tab === "sports" ? renderSports() : renderNewsSection(state.tab);
-  if (focused === "inj-search") {
-    const el = $("#inj-search");
-    el.focus();
-    el.setSelectionRange(caret, caret);
+  if (focused === "inj-search" || focused === "pick-q") {
+    const el = $(`#${focused}`);
+    if (el) {
+      el.focus();
+      el.setSelectionRange(caret, caret);
+    }
   }
 }
 
@@ -569,9 +836,44 @@ document.addEventListener("click", (e) => {
     store.set("wn.injFilter", id);
     render();
   } else if (action === "refresh") refresh();
+  else if (action === "pround") {
+    state.pick.round = id;
+    state.pick.open = null;
+    state.picks = null;
+    render();
+    load("picks", id);
+  } else if (action === "psort") {
+    state.pick.dir = state.pick.sort === id ? -state.pick.dir : id === "name" || id === "price" ? 1 : -1;
+    state.pick.sort = id;
+    $("#picks-table").innerHTML = picksTable();
+  } else if (action === "ppos") {
+    state.pick.pos = id;
+    render();
+  } else if (action === "popen") {
+    state.pick.open = state.pick.open === id ? null : id;
+    $("#picks-table").innerHTML = picksTable();
+  }
+});
+
+document.addEventListener("keydown", (e) => {
+  if ((e.key === "Enter" || e.key === " ") && e.target.matches("tr[data-action='popen']")) {
+    e.preventDefault();
+    e.target.click();
+  }
 });
 
 document.addEventListener("input", (e) => {
+  const t = e.target;
+  if (t.id === "pick-q" || t.id === "pick-max" || t.id === "pick-out") {
+    if (t.id === "pick-q") state.pick.q = t.value;
+    if (t.id === "pick-max") {
+      state.pick.max = Number(t.value);
+      $("#pick-max-label").textContent = `${state.pick.max.toFixed(1)} cr`;
+    }
+    if (t.id === "pick-out") state.pick.hideOut = t.checked;
+    $("#picks-table").innerHTML = picksTable();
+    return;
+  }
   if (e.target.id !== "inj-search") return;
   state.injQuery = e.target.value;
   $("#inj-list").innerHTML = injuryList();
@@ -601,7 +903,18 @@ async function refresh() {
 
 /* ================================================================ boot */
 
+/* Split the nameplate into letters so it can ink in one by one. */
+function setupNameplate() {
+  const el = $("#nameplate");
+  const text = el.textContent.trim();
+  el.setAttribute("aria-label", text);
+  el.innerHTML = [...text]
+    .map((c, i) => (c === " " ? `<span class="sp" aria-hidden="true"></span>` : `<span class="ch" aria-hidden="true" style="--i:${i}">${esc(c)}</span>`))
+    .join("");
+}
+
 async function boot() {
+  setupNameplate();
   initVisit();
   readHash();
   try {

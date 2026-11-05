@@ -4,25 +4,26 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>World News</title>
-  <meta name="color-scheme" content="light dark">
-  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><circle cx='16' cy='16' r='13' fill='none' stroke='%232F4BD3' stroke-width='3'/><path d='M3 16h26M16 3c5 4 5 22 0 26M16 3c-5 4-5 22 0 26' fill='none' stroke='%232F4BD3' stroke-width='2'/></svg>">
+  <meta name="color-scheme" content="light">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><circle cx='16' cy='16' r='13' fill='none' stroke='%23121212' stroke-width='3'/><path d='M3 16h26M16 3c5 4 5 22 0 26M16 3c-5 4-5 22 0 26' fill='none' stroke='%23121212' stroke-width='2'/></svg>">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Schibsted+Grotesk:ital,wght@0,400..900;1,400..900&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=UnifrakturMaguntia&family=Newsreader:ital,opsz,wght@0,6..72,400..800;1,6..72,400..600&family=Libre+Franklin:wght@400..800&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
   <a class="skip" href="#view">Skip to stories</a>
   <div class="wrap">
     <header class="masthead">
-      <h1 class="date" id="date"></h1>
-      <div class="mast-line">
-        <p class="greeting" id="greeting"></p>
+      <div class="mast-top">
+        <p class="dateline" id="date"></p>
         <div class="status">
           <span id="updated" aria-live="polite"></span>
           <button type="button" class="text-btn" data-action="refresh" id="refresh">Refresh</button>
         </div>
       </div>
+      <h1 class="nameplate" id="nameplate">The World News</h1>
+      <p class="greeting" id="greeting"></p>
       <nav class="tabs" id="tabs" aria-label="Sections"></nav>
     </header>
 

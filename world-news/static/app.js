@@ -418,7 +418,11 @@ function renderScores() {
 /* ================================================================ rendering: picks */
 
 const pid = (r) => `${r.key}|${r.team}`;
-const fmt = (v, d = 1) => (v == null ? "–" : Number(v).toFixed(d));
+const fmt = (v, d = 1) => {
+  if (v == null || Number.isNaN(Number(v))) return "–";
+  const n = Number(v);
+  return (Math.abs(n) < 0.5 * 10 ** -d ? 0 : n).toFixed(d); // never show "-0.0"
+};
 const signed = (v, d = 1) => (v > 0 ? `+${v.toFixed(d)}` : v.toFixed(d));
 
 function matchupCell(r) {
@@ -644,7 +648,7 @@ function coachPanel(coaches) {
     .join("");
   return `<section class="panel">
     <div class="panel-head"><h2>Coaches</h2></div>
-    <table class="table named"><thead><tr><th class="l">Coach</th><th class="l">Next</th><th>Price</th><th>Win</th><th>Owned</th></tr></thead><tbody>${rows}</tbody></table>
+    <table class="table coach-t"><thead><tr><th class="l">Coach</th><th class="l">Next</th><th>Price</th><th>Win</th><th>Owned</th></tr></thead><tbody>${rows}</tbody></table>
     <p class="panel-note">Coaches score on results, so they are ranked by win chance from this season's point margins plus home court.</p>
   </section>`;
 }
@@ -665,6 +669,57 @@ function captainStrip(keys, by) {
       </div>`
       )
       .join("")}</div>
+  </section>`;
+}
+
+function wildcardPanel(P, by) {
+  const W = P.wildcard;
+  if (!W) return "";
+  const l = W.lineup;
+  const line = (id, role) => {
+    const r = by.get(id);
+    if (!r) return "";
+    const mult = role === "Captain" ? 2 : role === "Bench" ? 0.5 : 1;
+    return `<tr><td class="l">${role}</td><td class="l"><span class="strong">${esc(r.name)}</span> <span class="muted">${esc(r.team)} ${r.pos}</span>${statusFlag(r)}</td><td class="l muted">${
+      r.home ? "vs" : "at"
+    } ${esc(r.opp)}</td><td>${fmt(r.price)}</td><td class="strong">${fmt(r.xfp * mult)}</td></tr>`;
+  };
+  const rows = [line(l.captain, "Captain"), ...l.starters.filter((i) => i !== l.captain).map((i) => line(i, "Starter")), line(l.sixth, "Sixth man"), ...l.bench.map((i) => line(i, "Bench"))].join("");
+  return `<section class="group">
+    <div class="group-head"><h2 class="group-title">Best team from scratch</h2></div>
+    <p class="prose">The highest-scoring ten for ${fmt(W.budget)} credits, the value of your saved team plus bank, worked out exactly rather than by trial and error. Use it in unlimited-transfer rounds, or as the target your weekly transfers move towards.</p>
+    <div class="tablewrap"><table class="table named wc">
+      <thead><tr><th class="l">Slot</th><th class="l">Player</th><th class="l">Next</th><th>Price</th><th>Exp. pts</th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table></div>
+    <p class="pick-note">${fmt(W.value)} expected points for ${fmt(W.cost)} credits; ${fmt(W.sim.mean)} with daily subs, usually between ${fmt(W.sim.p10)} and ${fmt(W.sim.p90)}. Coach not included.</p>
+  </section>`;
+}
+
+function teamBacktestPanel(tb) {
+  if (!tb) return `<section class="group"><div class="group-head"><h2 class="group-title">Do these teams win?</h2></div><p class="pick-note">Replaying past rounds in the background. Refresh in a minute.</p></section>`;
+  const a = tb.average;
+  const t = tb.total;
+  const rows = tb.rounds
+    .map(
+      (r) => `<tr><td class="l">Round ${r.round}</td><td class="strong">${fmt(r.model)}</td><td>${fmt(r.season)}</td><td>${fmt(r.model_wc)}</td><td>${fmt(r.season_wc)}</td><td class="muted">${fmt(
+        r.best
+      )}</td></tr>`
+    )
+    .join("");
+  const edge = Math.round((t.model / t.season - 1) * 100);
+  return `<section class="group">
+    <div class="group-head"><h2 class="group-title">Do these teams win?</h2></div>
+    <p class="prose">Each past round was replayed: a team was built with only what was known before tip-off and scored with what actually happened.
+    Starting from the best team in round ${tb.rounds[0].round} and then making 4 transfers a round, the model's teams scored <strong>${fmt(t.model)}</strong> points in total,
+    against ${fmt(t.season)} for the same approach driven by season averages: <strong>${edge > 0 ? "+" : ""}${edge}%</strong>.</p>
+    <div class="tablewrap"><table class="table bt named">
+      <thead><tr><th class="l">Round</th><th>Model, 4 transfers</th><th>Season avg, 4 transfers</th><th>Model, rebuilt</th><th>Season avg, rebuilt</th><th>Best possible</th></tr></thead>
+      <tbody>${rows}<tr><td class="l strong">Average</td><td class="strong">${fmt(a.model)}</td><td>${fmt(a.season)}</td><td>${fmt(a.model_wc)}</td><td>${fmt(a.season_wc)}</td><td class="muted">${fmt(
+        a.best
+      )}</td></tr></tbody>
+    </table></div>
+    <p class="pick-note">Budget ${fmt(tb.budget)} credits at today's prices, no subs, captain and bench as the optimiser set them before the round. "Best possible" is the perfect team in hindsight. Players who sat out stand in for that day's injury report.</p>
   </section>`;
 }
 
@@ -701,6 +756,8 @@ function renderPicks() {
       ${pickList("Fades", "Popular picks that are out, doubtful or poor value this round.", P.lists.fades, by, "fade")}
     </div>
 
+    ${wildcardPanel(P, by)}
+
     <section class="group">
       <div class="group-head"><h2 class="group-title">All players</h2></div>
       <div class="pick-tools">
@@ -716,7 +773,7 @@ function renderPicks() {
     </section>
 
     <div class="layout picks-bottom">
-      <div class="main">${trackPanel(P.track)}${backtestPanel(P.backtest)}
+      <div class="main">${teamBacktestPanel(P.team_backtest)}${trackPanel(P.track)}${backtestPanel(P.backtest)}
         <section class="group">
           <div class="group-head"><h2 class="group-title">How the projection works</h2></div>
           <p class="prose">Projected PIR = projected minutes × PIR per minute × matchup × home or away × availability. Expected fantasy points add the 10% win bonus times his team's win chance, which comes from each team's average point margin this season plus home court.

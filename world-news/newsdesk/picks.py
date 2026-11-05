@@ -35,7 +35,7 @@ from .net import fetch_text
 # for injured players' teammates and game pace were all tested the same way
 # and did not beat noise, so they stay at 0 (shown on the page as context).
 # Bump MODEL_VERSION whenever the model changes so the backtest reruns.
-MODEL_VERSION = 3
+MODEL_VERSION = 6
 
 FEIQ = "https://www.fantasyedgeiq.com"
 CET = ZoneInfo("Europe/Paris")
@@ -64,6 +64,7 @@ SLOTS = {"captain": 2.0, "starter": 1.0, "sixth": 1.0, "bench": 0.5}  # official
 HOME_EDGE_POINTS = 3.0  # home court in points, for win chances
 MARGIN_SD = 11.0  # spread of final margins around the expected one
 RATING_SHRINK = 3  # games before a team's net rating is trusted halfway
+PRICE_PRIOR = 0.0  # pull towards what his preseason price implies (0 = off)
 CALIBRATION = 0.9  # overall scale; PIR is right-skewed, so the MAE-optimal value is a bit below 1
 
 
@@ -96,6 +97,7 @@ def feiq_players():
                 "pos": r["pos_short"],
                 "price": _f(r["price"]),
                 "price_change": _f(r.get("price_change")) or 0.0,
+                "price_base": _f(r.get("price_base")),
                 "popularity": _f(r.get("popularity_pct")) or 0.0,
                 "injured_flag": r.get("is_injured") == "True",
                 "bench": r.get("started_from_bench") == "True",
@@ -347,6 +349,25 @@ def project(players, logs, domestic, games, rnd, cutoff, injuries=None):
         team_ts[r["team"]].add(r["ts"])
     team_games = {t: sorted(v) for t, v in team_ts.items()}
 
+    # what preseason prices say about PIR per minute (fit on games before cutoff)
+    price_fit = None
+    if PRICE_PRIOR:
+        xs, ys, ws = [], [], []
+        for p in players:
+            el_ = by_key.get(p["key"], [])
+            mins_ = sum(x["min"] for x in el_)
+            if p.get("price_base") and mins_ >= 40:
+                xs.append(p["price_base"])
+                ys.append(sum(x["pir"] for x in el_) / mins_)
+                ws.append(mins_)
+        if len(xs) >= 30:
+            mx = sum(x * w for x, w in zip(xs, ws)) / sum(ws)
+            my = sum(y * w for y, w in zip(ys, ws)) / sum(ws)
+            sxx = sum(w * (x - mx) ** 2 for x, w in zip(xs, ws))
+            sxy = sum(w * (x - mx) * (y - my) for x, y, w in zip(xs, ys, ws))
+            slope = sxy / sxx if sxx else 0.0
+            price_fit = (my - slope * mx, slope)
+
     rows = []
     for p in players:
         if p["pos"] not in ("G", "F", "C"):
@@ -380,6 +401,11 @@ def project(players, logs, domestic, games, rnd, cutoff, injuries=None):
             elif missed == 1:
                 minutes *= 0.85
                 reasons.append("Missed his team's last EuroLeague game")
+        elif team_played >= 3:
+            # his team has played several EuroLeague games without him:
+            # he is outside the EuroLeague rotation, whatever he plays at home
+            minutes = 2.0
+            reasons.append(f"Has not played in any of his team's {team_played} EuroLeague games")
         elif recent_dom:
             minutes = 0.85 * statistics.mean(d["min"] for d in recent_dom)
             reasons.append("No EuroLeague minutes yet, projected from domestic games")
@@ -406,6 +432,8 @@ def project(players, logs, domestic, games, rnd, cutoff, injuries=None):
             num += w * d["pir"]
             den += w * d["min"]
         rate = num / den if den else prior
+        if price_fit and p.get("price_base"):
+            rate = (1 - PRICE_PRIOR) * rate + PRICE_PRIOR * max(0.0, price_fit[0] + price_fit[1] * p["price_base"])
 
         # --- matchup and venue
         dvp, dvp_games = ctx["dvp"].get(opp["code"], {}).get(p["pos"], (1.0, 0))
@@ -578,6 +606,8 @@ def project(players, logs, domestic, games, rnd, cutoff, injuries=None):
                 "ceil": round(proj + sd, 1),
                 "win": round(win * 100),
                 "xfp": round(xfp, 1),
+                "avail": round(r["avail"], 2),
+                "sd": round(sd, 2),
                 "value": round(xfp / price, 2) if price else None,
                 "minutes": round(minutes * r["avail"], 1),
                 "rate": round(r["rate"], 3),
@@ -1030,3 +1060,21 @@ def gameday_subs(lineup, entries, min_gain=1.0):
         "gain": round(gain, 1),
         "lineup": {"captain": new_cap, "starters": starters, "sixth": sixth, "bench": bench_new},
     }
+
+
+def rotation_absences(logs, rnd):
+    """Rotation players (10+ minutes in their team's previous game) who did
+    not play in round rnd. Used as a stand-in for the injury report when
+    replaying past rounds."""
+    played = {(r["key"], r["team"]) for r in logs if r["round"] == rnd}
+    teams = {r["team"] for r in logs if r["round"] == rnd}
+    out = {}
+    for t in teams:
+        prev = [r for r in logs if r["team"] == t and r["round"] < rnd]
+        if not prev:
+            continue
+        last = max(r["round"] for r in prev)
+        for r in prev:
+            if r["round"] == last and r["min"] >= 10 and (r["key"], t) not in played:
+                out[r["key"]] = {"severity": 0, "status": "Out", "comment": "did not play"}
+    return out

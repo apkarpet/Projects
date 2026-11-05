@@ -16,7 +16,7 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-from newsdesk import fantasy, picks, sports
+from newsdesk import fantasy, optimize, picks, sports
 from newsdesk.cache import Cache
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
@@ -114,6 +114,7 @@ def picks_inputs(force=False):
     list(fantasy._BOX_POOL.map(lambda g: cached_box(season, g), finished))  # fill the cache in parallel
     logs = picks.el_logs(games, lambda g: cached_box(season, g))
     feiq = cache.get("picks:feiq", 60 * 60, picks.feiq_players, force)
+    log_prices(feiq["players"])
     try:
         domestic = cache.get("picks:domestic", 6 * 3600, picks.feiq_domestic, force)
     except Exception:  # noqa: BLE001 - projections still work without domestic games
@@ -126,6 +127,86 @@ def picks_inputs(force=False):
     return {
         "season": season, "games": games, "finished": finished, "logs": logs, "feiq": feiq,
         "domestic": domestic, "inj": inj, "injuries": injuries,
+    }
+
+
+PRICES_PATH = os.path.join(os.path.dirname(TRACK_DIR), "prices.jsonl")
+_prices_logged = {"day": None}
+
+
+def log_prices(players):
+    """Append one snapshot of official prices per day. Prices move with
+    performance; a season of history lets the tool learn how."""
+    day = time.strftime("%Y-%m-%d")
+    if _prices_logged["day"] == day:
+        return
+    try:
+        if os.path.exists(PRICES_PATH):
+            line = ""
+            with open(PRICES_PATH) as f:
+                for line in f:
+                    pass
+                if line.startswith(f'{{"day": "{day}"'):
+                    _prices_logged["day"] = day
+                    return
+        os.makedirs(os.path.dirname(PRICES_PATH), exist_ok=True)
+        snap = {"day": day, "prices": {f"{p['key']}|{p['team']}": p["price"] for p in players}}
+        with open(PRICES_PATH, "a") as f:
+            f.write(json.dumps(snap) + "\n")
+        _prices_logged["day"] = day
+    except OSError as e:
+        log.warning("could not log prices: %s", e)
+
+
+_team_bt_lock = threading.Lock()
+
+
+def team_backtest(inp, done):
+    """Team-level backtest, computed once per model version and finished
+    round (it takes a while), in the background."""
+    key = f"picks:teambt:v{picks.MODEL_VERSION}:{inp['season']}:{done}"
+    entry = cache.data.get(key)
+    if entry:
+        return entry["v"]
+
+    def run():
+        if not _team_bt_lock.acquire(blocking=False):
+            return
+        try:
+            cache.get(key, float("inf"), lambda: optimize.team_backtest(inp["feiq"]["players"], inp["logs"], inp["domestic"]["games"], inp["games"]))
+        except Exception as e:  # noqa: BLE001
+            log.warning("team backtest failed: %s", e)
+        finally:
+            _team_bt_lock.release()
+
+    threading.Thread(target=run, daemon=True).start()
+    return None
+
+
+def player_budget(inp):
+    """Credits available for the ten players: the saved team's value plus bank,
+    or 95 (100 minus a typical coach) when no team is saved."""
+    team = load_team()
+    prices = {f"{p['key']}|{p['team']}": p["price"] for p in inp["feiq"]["players"]}
+    if team and all(i in prices for i in team["players"]):
+        return round(sum(prices[i] for i in team["players"]) + team.get("bank", 0), 1)
+    return 95.0
+
+
+def wildcard(inp, rows, budget):
+    players = {f"{p['key']}|{p['team']}": {"pos": p["pos"], "price": p["price"]} for p in inp["feiq"]["players"] if p["pos"] in ("G", "F", "C")}
+    pts = {f"{r['key']}|{r['team']}": r["xfp"] for r in rows}
+    sol = optimize.best_roster(players, [(1.0, pts)], budget)
+    if not sol:
+        return None
+    info = optimize.sim_info(rows)
+    lineup = sol["lineups"][0]
+    return {
+        "budget": budget,
+        "cost": round(sum(players[i]["price"] for i in sol["roster"]), 1),
+        "value": round(sol["value"], 1),
+        "lineup": lineup,
+        "sim": optimize.simulate_round(sol["roster"], info, lineup),
     }
 
 
@@ -162,6 +243,11 @@ def get_picks(rnd=None, force=False):
     )
     info = picks._team_info(games)
     lock = picks.first_tip(games, rnd)
+    try:
+        wc = wildcard(inp, rows, player_budget(inp))
+    except Exception as e:  # noqa: BLE001
+        log.warning("wildcard failed: %s", e)
+        wc = None
     lists = picks.suggestions(rows)
     if rnd == target and lock and time.time() < lock:
         try:
@@ -177,6 +263,8 @@ def get_picks(rnd=None, force=False):
         "lists": lists,
         "scoring": {"win_bonus": picks.WIN_BONUS, "slots": picks.SLOTS},
         "track": picks.track_record(TRACK_DIR, logs, games),
+        "wildcard": wc,
+        "team_backtest": team_backtest(inp, done),
         "coaches": picks.coach_rows(feiq["players"], games, rnd),
         "teams": info,
         "context": {"home_edge": round(built["home_edge"], 3), "rate": {k: round(v, 3) for k, v in built["rate"].items()}},
@@ -366,29 +454,75 @@ def save_live_lineup(body):
 
 
 def suggest_transfers(body):
-    """Best transfers for a draft roster within budget and position limits."""
+    """Best transfers for a draft roster: exact optimisation for each number
+    of transfers, re-ranked by a simulation of the round with daily subs."""
     inp = picks_inputs()
     target = picks.next_round(inp["games"])
     rnd = int(body.get("round") or target)
-    horizon = 3 if body.get("horizon") == 3 else 1
-    weighted = []
-    for i, w in enumerate(picks.HORIZON_WEIGHTS[:horizon]):
-        rows = round_rows(inp, rnd + i)["rows"]
-        weighted.append((w, {f"{r['key']}|{r['team']}": r["xfp"] for r in rows}))
-    info = {
+    rows = round_rows(inp, rnd)["rows"]
+    pts = {f"{r['key']}|{r['team']}": r["xfp"] for r in rows}
+    info = optimize.sim_info(rows)
+    players = {
         f"{p['key']}|{p['team']}": {"pos": p["pos"], "price": p["price"]}
         for p in inp["feiq"]["players"]
         if p["pos"] in ("G", "F", "C")
     }
-    roster = [i for i in body.get("players", []) if i in info]
+    roster = [i for i in body.get("players", []) if i in players]
     if len(roster) != 10:
         raise ValueError("Pick all ten players first")
     coach_price = next((p["price"] for p in inp["feiq"]["players"] if f"{p['key']}|{p['team']}" == body.get("coach")), 0.0)
     budget = float(body.get("budget", 0)) - coach_price
-    max_moves = int(body.get("max_moves", 4))
-    result = picks.optimize_transfers(roster, info, weighted, budget, max(0, min(max_moves, 6)))
-    result["horizon"] = horizon
-    return result
+    max_moves = max(0, min(int(body.get("max_moves", 4)), 10))
+
+    for i in players:  # players without a game this round score nothing
+        info.setdefault(i, {"mean": 0.0, "sd": 1.0, "p": 0.0, "win": 0.5, "team": i, "tip": None})
+
+    def simulate(ros, lineup=None):
+        return optimize.simulate_round(ros, info, lineup)
+
+    base_value = picks.lineup_value([pts.get(i, 0.0) for i in roster])
+    current = {"value": round(base_value, 1), "sim": simulate(roster)}
+    options, seen = [], set()
+    counts = list(range(1, min(max_moves, 4) + 1))
+    if max_moves > 4:
+        counts.append(max_moves)  # a full rebuild when transfers are unlimited
+    for k in counts:
+        cands = optimize.k_best_rosters(players, [(1.0, pts)], budget, roster, k, k=3)
+        best = None
+        for sol in cands:
+            sim = simulate(sol["roster"], sol["lineups"][0])
+            if best is None or sim["mean"] > best[1]["mean"]:
+                best = (sol, sim)
+        if not best:
+            continue
+        sol, sim = best
+        key = frozenset(sol["roster"])
+        if key in seen or sol["value"] <= base_value + 0.05:
+            continue
+        seen.add(key)
+        sells = sorted((i for i in roster if i not in key), key=lambda i: players[i]["pos"])
+        buys = sorted((i for i in sol["roster"] if i not in roster), key=lambda i: players[i]["pos"])
+        # pair sells and buys by position for display
+        moves = []
+        for pos in ("G", "F", "C"):
+            o = [i for i in sells if players[i]["pos"] == pos]
+            n = [i for i in buys if players[i]["pos"] == pos]
+            moves += [list(m) for m in zip(o, n)]
+        cost = sum(players[i]["price"] for i in sol["roster"])
+        options.append(
+            {
+                "transfers": len(moves),
+                "moves": moves,
+                "gain": round(sol["value"] - base_value, 1),
+                "sim_gain": round(sim["mean"] - current["sim"]["mean"], 1),
+                "sim": sim,
+                "lineup": sol["lineups"][0],
+                "cost": round(cost, 1),
+                "bank": round(budget - cost, 1),
+                "rebuild": k > 4,
+            }
+        )
+    return {"current": current, "options": options}
 
 
 def get_meta():

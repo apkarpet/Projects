@@ -18,7 +18,6 @@ const teamState = {
   sugg: null,
   suggKey: "",
   suggBusy: false,
-  horizon: 1,
   error: null,
   msg: "",
 };
@@ -120,7 +119,7 @@ async function requestSuggestions() {
   const coaches = coachPool();
   const t = teamTotals(d, pool, coaches);
   const maxMoves = d.unlimited ? 6 : Math.max(0, TEAM_FREE_TRANSFERS - t.used);
-  const body = { players: d.players, coach: d.coach, budget: t.budget, max_moves: maxMoves, horizon: teamState.horizon, round: state.picks.round };
+  const body = { players: d.players, coach: d.coach, budget: t.budget, max_moves: maxMoves, round: state.picks.round };
   const key = JSON.stringify(body);
   if (key === teamState.suggKey) return;
   teamState.suggKey = key;
@@ -133,7 +132,10 @@ async function requestSuggestions() {
   render();
   try {
     const res = await apiPost("myteam/suggest", body);
-    if (teamState.suggKey === key) teamState.sugg = res;
+    if (teamState.suggKey === key) {
+      teamState.sugg = res;
+      teamState.suggFor = key;
+    }
   } catch (e) {
     teamState.sugg = { error: e.message, options: [] };
   }
@@ -236,11 +238,8 @@ document.addEventListener("click", (e) => {
     const opt = teamState.sugg?.options?.[Number(id)];
     if (!opt) return;
     for (const [out, inn] of opt.moves) replacePlayer(out, inn);
-    d.lineup = autoLineup(d.players, pool);
+    d.lineup = opt.lineup && lineupValid(opt.lineup, d.players) ? JSON.parse(JSON.stringify(opt.lineup)) : autoLineup(d.players, pool);
     return draftChanged();
-  } else if (action === "horizon") {
-    teamState.horizon = Number(id);
-    requestSuggestions();
   } else if (action === "unlimited") {
     d.unlimited = !d.unlimited;
     return draftChanged();
@@ -410,7 +409,6 @@ function pickerPanel(pool, coaches, totals) {
 function suggestionsPanel(pool) {
   const s = teamState.sugg;
   const d = teamState.draft;
-  const horizon = seg("thorizon", [{ key: 1, label: "This round" }, { key: 3, label: "Next 3 rounds" }], teamState.horizon).replaceAll('data-action="thorizon"', 'data-taction="horizon"');
   let body;
   if (teamState.suggBusy && !s) body = skeleton(3);
   else if (!s) body = "";
@@ -421,7 +419,7 @@ function suggestionsPanel(pool) {
     body = s.options
       .map(
         (o, i) => `<div class="sugg">
-        <div class="sugg-head"><span class="strong">${o.transfers} transfer${o.transfers > 1 ? "s" : ""}</span><span class="up strong">+${fmt(o.gain)} pts</span></div>
+        <div class="sugg-head"><span class="strong">${o.rebuild ? `Full rebuild, ${o.transfers} transfers` : `${o.transfers} transfer${o.transfers > 1 ? "s" : ""}`}</span><span class="up strong">+${fmt(o.gain)}</span></div>
         <ul>${o.moves
           .map(([out, inn]) => {
             const a = pool.get(out);
@@ -431,18 +429,16 @@ function suggestionsPanel(pool) {
             )}</span></li>`;
           })
           .join("")}</ul>
-        <div class="sugg-foot"><span class="muted">${fmt(o.bank)} cr left</span><button type="button" class="btn small" data-taction="apply" data-id="${i}">Apply</button></div>
+        <div class="sugg-foot"><span class="muted">${fmt(o.sim.mean)} with subs, likely ${fmt(o.sim.p10)} to ${fmt(o.sim.p90)}. ${fmt(o.bank)} cr left.</span><button type="button" class="btn small" data-taction="apply" data-id="${i}">Apply</button></div>
       </div>`
       )
       .join("");
-  const note =
-    teamState.horizon === 3
-      ? "Gains add up expected lineup points over the next three rounds, weighted 100%, 60% and 40%."
-      : "Gains are expected lineup points this round, after re-picking captain, starters and bench.";
   return `<section class="panel">
-    <div class="panel-head"><h2>Suggested transfers</h2>${horizon}</div>
+    <div class="panel-head"><h2>Suggested transfers</h2>${teamState.suggBusy && s ? `<span class="muted">Updating…</span>` : ""}</div>
     ${body}
-    <p class="panel-note">${note} Same-position swaps only, within your budget.${d.unlimited ? "" : ` Uses your free transfers left.`}</p>
+    <p class="panel-note">The mathematically best team for each number of transfers, within your budget and positions, judged on this round. Gains are expected lineup points (captain ×2, bench ×½); "with subs" plays the round 4,000 times including your morning subs. Planning further ahead tested worse, so this looks at one round.${
+      d.unlimited ? "" : " Uses the free transfers you have left."
+    }</p>
   </section>`;
 }
 
@@ -522,7 +518,9 @@ function renderTeam() {
       </div>
     </div>
     <div class="team-stats">
-      <div><span class="ts-big">${fmt(t.total)}</span><span class="ts-label">expected points this round</span></div>
+      <div><span class="ts-big">${fmt(t.total)}</span><span class="ts-label">expected points this round${
+        teamState.sugg?.current?.sim && teamState.suggFor === teamState.suggKey ? `, ${fmt(teamState.sugg.current.sim.mean)} with daily subs` : ""
+      }</span></div>
       <div><span class="ts-big ${t.bank < -0.05 ? "down" : ""}">${fmt(t.bank)}</span><span class="ts-label">credits left of ${fmt(t.budget)}</span></div>
       <div><span class="ts-big ${!d.unlimited && t.used > TEAM_FREE_TRANSFERS ? "down" : ""}">${t.used}</span><span class="ts-label">transfers: ${transfers}</span></div>
       <label class="check"><input type="checkbox" data-taction="unlimited" ${d.unlimited ? "checked" : ""}> Unlimited transfers this round</label>

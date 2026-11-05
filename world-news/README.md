@@ -1,55 +1,56 @@
-# World News
+# Fantasy Desk
 
-A personal morning news site on `http://localhost:8420`. It has three sections:
-
-- **Work:** AI and models, big tech, chips and hardware, with Hacker News and Lobsters alongside.
-- **Sports:** EuroLeague, NBA and the Greek league, each with scores, standings and news, plus a **Fantasy** tab: the BasketNews injury report, top PIR per round and season PIR leaders. Injured players are flagged in the PIR lists.
-- **Picks** (under Sports): EuroLeague Fantasy Challenge suggestions for the next round, using the official scoring (PIR, +10% when the team wins, captain ×2). Every player gets expected fantasy points from projected minutes × PIR per minute × matchup × venue × injury status × win chance, which is divided by his official price. The page has captain picks, top projected, best value, differentials and fades lists, coaches by win chance, a sortable table of every player with reasons and team ratings, a backtest against simple baselines and a hindsight noise floor, and a live track record. Projections are saved before each lineup lock in `~/.local/share/world-news/tracking/` and scored after the round.
-- **My team** (under Sports): your EuroLeague Fantasy roster on a court (4 guards, 4 forwards, 2 centers and a coach). Click players to make one captain, swap starters and bench, or sell and buy from a list of affordable replacements. It shows expected points with slot multipliers, credits left, transfers used (4 free, or unlimited when ticked), the best 1 to 4 transfers for this round or the next three, and a gameday subs helper. Plan here, make the same moves in the official app, then press Save; the team is kept in `~/.local/share/world-news/my-team.json`.
-- **Other:** world, US politics, economy, Greece and Europe, and science, with a markets panel.
-
-Stories published since your last visit get a dot, and links you have opened fade.
-
-## Run
+A local EuroLeague Fantasy Challenge assistant with basketball scores, on `http://localhost:8420`.
 
 ```sh
-news            # start in the background if needed, then open the browser
-news stop       # stop it
-news restart    # after editing Python code
-news logs       # follow the server log
-news fg         # run in the foreground
+fantasy          # or: news. Starts the server if needed and opens the site
+fantasy stop     # stop it
+fantasy restart  # after editing Python code
+fantasy logs     # follow the server log
 ```
 
-`news` is a symlink from `~/.local/bin/news` to `bin/news`. It needs only Python 3.11+ and its standard library; there is nothing to install.
+It needs Python 3.11+ with numpy and scipy. Press `1` to `4` to switch tabs and `R` to refresh.
 
-In the browser, press `1` `2` `3` to switch sections and `R` to refresh.
+## Tabs
 
-## Change topics
+- **My team**:
+  - **Live round:** while a round is being played, your lineup is on a court with real points for finished games (PIR, +10% for a win, then the slot multiplier), live scores, and expected points for games to come. It also suggests morning subs that follow the official rules and says by which morning to make each one.
+  - **Next round:** plan transfers on the court. Click a player to make him captain, swap him or sell him. Suggestions are the mathematically best team for 1 to 4 transfers, or a full rebuild in unlimited rounds, each checked by simulating the round 4,000 times with daily subs.
+  - Plan here, make the same moves in the official app, then press Save. The team is kept in `~/.local/share/world-news/my-team.json`.
+- **Picks**:
+  - Captain choices, top projected, best value, differentials and fades.
+  - The best team from scratch for your budget.
+  - A sortable table of every player with the reasons behind his number.
+  - How well the model's teams would have scored in past rounds, and a live track record of saved pre-lock projections.
+- **Injuries & form**: the BasketNews injury report, top PIR by round and season PIR leaders.
+- **Scores**: EuroLeague, NBA and Greek league scores and standings.
 
-Everything lives in `config.json`, and the server reloads it automatically. A topic is a list of feeds:
+## How the numbers are made
 
-```json
-{"rss": "https://example.com/feed.xml", "name": "Example", "cap": 3}
-{"google": "search terms", "sources": "tech", "max": 12}
-{"google_topic": "BUSINESS", "sources": "news"}
-```
+Projected PIR = projected minutes × PIR per minute × matchup × home or away × availability.
 
-- `sources` keeps Google News results from the outlets in that `source_lists` entry only. This is what stops low-quality results from getting in.
-- `match` (regex) keeps only matching titles. `exclude` on a topic, or `exclude_titles` globally, drops matching titles.
-- `cap` limits how many stories one outlet can have in a topic.
-- `placement: "rail"` puts a topic in the side column.
-- `favorite_teams`, e.g. `["Panathinaikos"]`, highlights those teams in scores and standings.
+Expected fantasy points add the 10% win bonus times the team's win chance. Lineups count the captain ×2, the other starters and sixth man ×1, and the bench ×0.5.
 
-## Data sources
+| Piece | Where it lives |
+| --- | --- |
+| Projections and backtests | `newsdesk/picks.py` |
+| Exact team optimisation (mixed-integer programming) and the Monte Carlo round simulator | `newsdesk/optimize.py` |
+
+Every model change was tested by replaying finished rounds with only the information available before tip-off. Ideas that did not beat noise were left switched off, and the code comments say which.
+
+## Data
 
 | Data | Source |
 | --- | --- |
-| News | Publisher RSS feeds, Google News (filtered), HN Algolia API |
-| EuroLeague scores, standings, box scores, PIR | Official EuroLeague feeds |
-| NBA scores, standings, news | ESPN public API |
-| Greek league scores and standings | esake.gr (Greek team names are translated) |
+| Box scores, schedule, standings, PIR | Official EuroLeague feeds |
+| Official-game prices, popularity, domestic box scores | FantasyEdgeIQ public CSV and pages |
 | Injury report | BasketNews "EuroLeague Injury Report (updated daily)" |
-| Fantasy prices, popularity, domestic box scores | FantasyEdgeIQ public CSV and domestic-competitions page |
-| Markets | CNBC quotes |
+| NBA and Greek league scores | ESPN public API, esake.gr |
 
-Responses are cached in `~/.cache/world-news/` for 15 minutes for news, 10 minutes for scores (1 minute while a game is live) and 30 minutes for fantasy data. Finished box scores are cached for good. If a source is down, the last good copy is served.
+Kept in `~/.local/share/world-news/`:
+
+- `tracking/`: pre-lock projections for each round
+- `prices.jsonl`: one price snapshot a day
+- `my-team.json`: your team
+
+Caches are in `~/.cache/world-news/`.

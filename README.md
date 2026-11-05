@@ -14,6 +14,7 @@ assembly.
 | [`datastructs/`](datastructs/) | C and Python data-structure exercises, sorting/searching implementations, and project submissions |
 | [`riscv/`](riscv/) | RISC-V assembly labs and architecture experiments for the RARS simulator |
 | [`selfmade/`](selfmade/) | Independent projects, including a small C shell implementation in [`selfmade/c_c++/`](selfmade/c_c++/) |
+| [`world-news/`](world-news/) | Personal morning news site on localhost: tech, basketball scores and EuroLeague Fantasy data, world news |
 
 Each project directory contains its own README with more specific
 documentation, prerequisites, build commands, and usage instructions.

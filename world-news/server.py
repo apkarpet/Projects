@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""World News: a personal morning news site served on localhost.
+"""Fantasy Desk: EuroLeague Fantasy tools and basketball scores on localhost.
 
     python3 server.py            # serve on the port from config.json
     python3 server.py --port N   # override the port
@@ -16,7 +16,7 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-from newsdesk import fantasy, feeds, markets, picks, sports
+from newsdesk import fantasy, picks, sports
 from newsdesk.cache import Cache
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
@@ -55,24 +55,11 @@ def _digest(obj):
 
 # ---------------------------------------------------------------- data
 
-NEWS_TTL = 15 * 60
 LEAGUES = {"euroleague": sports.euroleague, "nba": sports.nba, "gbl": sports.gbl}
 
 
 def sports_ttl(payload):
     return 60 if sports.has_live(payload) else 10 * 60
-
-
-def get_news(section, force=False):
-    cfg = config()
-    sec = cfg["sections"].get(section)
-    if sec is None:
-        return None
-    key = f"news:{section}:{_digest([sec, cfg.get('source_lists'), cfg.get('exclude_titles')])}"
-    data = cache.get(key, NEWS_TTL, lambda: feeds.build_section(
-            sec, cfg.get("max_age_hours", 72), cfg.get("source_lists"), cfg.get("exclude_titles")
-        ), force)
-    return {**data, "fetched": cache.fetched_at(key)}
 
 
 def get_league(league, force=False):
@@ -404,30 +391,9 @@ def suggest_transfers(body):
     return result
 
 
-def get_markets(force=False):
-    cfg = config()
-    key = f"markets:{_digest(cfg.get('markets', []))}"
-    try:
-        data = cache.get(key, 5 * 60, lambda: markets.quotes(cfg.get("markets", [])), force)
-    except Exception:  # noqa: BLE001
-        data = []
-    return {"quotes": data, "fetched": cache.fetched_at(key)}
-
-
 def get_meta():
     cfg = config()
-    return {
-        "name": cfg.get("name", ""),
-        "favorite_teams": cfg.get("favorite_teams", []),
-        "sections": [
-            {
-                "id": sid,
-                "title": s["title"],
-                "topics": [{"id": t["id"], "title": t["title"], "placement": t.get("placement", "main")} for t in s["topics"]],
-            }
-            for sid, s in cfg["sections"].items()
-        ],
-    }
+    return {"name": cfg.get("name", ""), "favorite_teams": cfg.get("favorite_teams", [])}
 
 
 def keep_picks_fresh():
@@ -440,9 +406,8 @@ def keep_picks_fresh():
 
 def warm_up():
     """Fill the cache in the background right after start-up."""
-    jobs = [lambda s=s: get_news(s) for s in config()["sections"]]
-    jobs += [lambda lg=lg: get_league(lg) for lg in LEAGUES]
-    jobs += [get_markets, get_fantasy, get_picks]
+    jobs = [lambda lg=lg: get_league(lg) for lg in LEAGUES]
+    jobs += [get_fantasy, get_picks]
     t0 = time.time()
     threads = [threading.Thread(target=_quiet, args=(j,), daemon=True) for j in jobs]
     for t in threads:
@@ -463,7 +428,7 @@ def _quiet(fn):
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "WorldNews/1.0"
+    server_version = "FantasyDesk/1.0"
 
     def log_message(self, fmt, *args):  # keep the log readable
         if os.environ.get("WORLD_NEWS_DEBUG"):
@@ -498,14 +463,10 @@ class Handler(BaseHTTPRequestHandler):
             return self._json({"ok": True})
         if route == "meta":
             return self._json(get_meta())
-        if route == "news":
-            data = get_news(arg, force)
-        elif route == "sports":
+        if route == "sports":
             data = get_league(arg, force)
         elif route == "fantasy":
             data = get_fantasy(force)
-        elif route == "markets":
-            data = get_markets(force)
         elif route == "picks":
             data = get_picks(arg, force)
         elif route == "myteam" and arg == "live":
@@ -574,7 +535,7 @@ def main():
     port = args.port or int(config().get("port", 8420))
     httpd = ThreadingHTTPServer(("127.0.0.1", port), Handler)
     httpd.daemon_threads = True
-    log.info("World News on http://localhost:%d", port)
+    log.info("Fantasy Desk on http://localhost:%d", port)
     if not args.no_warmup:
         threading.Thread(target=warm_up, daemon=True).start()
         threading.Thread(target=keep_picks_fresh, daemon=True).start()

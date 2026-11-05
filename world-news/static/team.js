@@ -559,7 +559,7 @@ async function loadLive() {
 
 // keep live scores moving while games are on
 setInterval(() => {
-  if (document.visibilityState !== "visible" || state.tab !== "sports" || state.sub.sports !== "team" || teamState.view !== "live") return;
+  if (document.visibilityState !== "visible" || state.tab !== "team" || teamState.view !== "live") return;
   const L = teamState.live;
   if (!L || L.done) return;
   const anyLive = L.players.some((p) => p.state === "in");

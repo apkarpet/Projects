@@ -63,13 +63,17 @@ const store = {
 
 /* ================================================================ state */
 
-const SPORT_TABS = [
-  { id: "euroleague", title: "EuroLeague", topic: "euroleague", league: "euroleague" },
-  { id: "fantasy", title: "Fantasy" },
-  { id: "picks", title: "Picks" },
+const TABS = [
   { id: "team", title: "My team" },
-  { id: "nba", title: "NBA", topic: "nba", league: "nba" },
-  { id: "gbl", title: "Greek league", topic: "greek", league: "gbl" },
+  { id: "picks", title: "Picks" },
+  { id: "form", title: "Injuries & form" },
+  { id: "scores", title: "Scores" },
+];
+
+const LEAGUES = [
+  { id: "euroleague", title: "EuroLeague", league: "euroleague" },
+  { id: "nba", title: "NBA", league: "nba" },
+  { id: "gbl", title: "Greek league", league: "gbl" },
 ];
 
 const LEAGUE_INFO = {
@@ -80,12 +84,10 @@ const LEAGUE_INFO = {
 
 const state = {
   meta: null,
-  tab: "work",
-  sub: { work: "all", sports: "euroleague", other: "all" },
-  news: {},
+  tab: "team",
+  sub: { scores: "euroleague" },
   leagues: {},
   fantasy: null,
-  markets: null,
   errors: {},
   round: {},
   group: {},
@@ -94,30 +96,9 @@ const state = {
   picks: null,
   pick: { round: null, sort: "xfp", dir: -1, pos: "all", max: null, q: "", hideOut: true, open: null },
   injQuery: "",
-  baseline: null,
+  loadedAt: null,
   refreshing: false,
 };
-
-/* "New" means published after you last had the page open. A visit counts as
-   new once the page has been closed for more than two hours, so reloading
-   during the same morning keeps the same markers. */
-function initVisit() {
-  const v = store.get("wn.visit", {});
-  const now = nowSec();
-  if (!v.lastSeen || now - v.lastSeen > 2 * 3600) v.baseline = v.lastSeen || null;
-  v.lastSeen = now;
-  store.set("wn.visit", v);
-  state.baseline = v.baseline;
-  const touch = () => {
-    const cur = store.get("wn.visit", {});
-    cur.lastSeen = nowSec();
-    store.set("wn.visit", cur);
-  };
-  setInterval(() => document.visibilityState === "visible" && touch(), 60_000);
-  document.addEventListener("visibilitychange", touch);
-}
-
-const isNew = (item) => state.baseline && item.ts > state.baseline;
 
 function favourite(team) {
   const favs = state.meta?.favorite_teams || [];
@@ -131,12 +112,11 @@ function favourite(team) {
 async function load(kind, arg, fresh = false) {
   const key = arg ? `${kind}:${arg}` : kind;
   try {
-    if (kind === "news") state.news[arg] = await api(`news/${arg}`, fresh);
-    else if (kind === "sports") state.leagues[arg] = await api(`sports/${arg}`, fresh);
+    if (kind === "sports") state.leagues[arg] = await api(`sports/${arg}`, fresh);
     else if (kind === "fantasy") state.fantasy = await api("fantasy", fresh);
     else if (kind === "picks") state.picks = await api(`picks${arg ? "/" + arg : ""}`, fresh);
-    else if (kind === "markets") state.markets = await api("markets", fresh);
     delete state.errors[key];
+    state.loadedAt = nowSec();
   } catch (e) {
     state.errors[key] = e.message;
   }
@@ -144,13 +124,8 @@ async function load(kind, arg, fresh = false) {
 }
 
 function loadAll(fresh = false) {
-  const jobs = [];
-  for (const s of state.meta.sections) jobs.push(load("news", s.id, fresh && s.id === state.tab));
-  const sportsFresh = fresh && state.tab === "sports";
-  for (const lg of ["euroleague", "nba", "gbl"]) jobs.push(load("sports", lg, sportsFresh));
-  jobs.push(load("markets", null, fresh && state.tab === "other"));
-  jobs.push(load("fantasy", null, sportsFresh));
-  jobs.push(load("picks", state.pick.round, sportsFresh));
+  const jobs = [load("picks", state.pick.round, fresh), load("fantasy", null, fresh)];
+  for (const lg of LEAGUES) jobs.push(load("sports", lg.league, fresh && state.tab === "scores"));
   return Promise.all(jobs);
 }
 
@@ -158,7 +133,7 @@ function loadAll(fresh = false) {
 
 function readHash() {
   const [tab, sub] = location.hash.replace(/^#/, "").split("/");
-  if (["work", "sports", "other"].includes(tab)) {
+  if (TABS.some((t) => t.id === tab)) {
     state.tab = tab;
     if (sub) state.sub[tab] = sub;
   }
@@ -168,7 +143,7 @@ function go(tab, sub) {
   state.tab = tab;
   if (sub) state.sub[tab] = sub;
   const s = state.sub[tab];
-  history.replaceState(null, "", `#${tab}${s && s !== "all" ? "/" + s : ""}`);
+  history.replaceState(null, "", `#${tab}${s ? "/" + s : ""}`);
   render();
   window.scrollTo({ top: Math.min(window.scrollY, $(".tabs").offsetTop - 12) });
 }
@@ -182,45 +157,29 @@ function renderMasthead() {
   const hello = h < 5 ? "Up late" : h < 12 ? "Good morning" : h < 18 ? "Good afternoon" : "Good evening";
   const name = state.meta?.name;
   let line = `${hello}${name ? `, <strong>${esc(name)}</strong>` : ""}.`;
-  const total = ["work", "sports", "other"].reduce((n, s) => n + newCount(s), 0);
-  if (state.baseline && total) {
-    const when = new Date(state.baseline * 1000).toLocaleString("en-GB", { weekday: "long", hour: "2-digit", minute: "2-digit" });
-    line += ` ${total} new ${total === 1 ? "story" : "stories"} since ${when}.`;
+  const P = state.picks;
+  if (P?.lock && P.round === P.next_round) {
+    const when = new Date(P.lock * 1000).toLocaleString("en-GB", { weekday: "long", hour: "2-digit", minute: "2-digit" });
+    line += ` Round ${P.round} lineups lock ${when}.`;
   }
   $("#greeting").innerHTML = line;
-
-  const times = Object.values(state.news).map((d) => d.fetched).filter(Boolean);
-  const updated = times.length ? Math.min(...times) : null;
-  $("#updated").textContent = state.refreshing ? "Refreshing…" : updated ? `Updated ${clock(updated)}` : "";
+  $("#updated").textContent = state.refreshing ? "Refreshing…" : state.loadedAt ? `Updated ${clock(state.loadedAt)}` : "";
   $("#refresh").disabled = state.refreshing;
 }
 
-function newCount(sectionId) {
-  const d = state.news[sectionId];
-  if (!d || !state.baseline) return 0;
-  return d.topics.reduce((n, t) => n + t.items.filter(isNew).length, 0);
-}
-
 function renderTabs() {
-  const sections = state.meta?.sections || [];
-  $("#tabs").innerHTML = sections
-    .map((s, i) => {
-      const n = newCount(s.id);
-      return `<button type="button" class="tab" role="tab" data-action="tab" data-id="${s.id}"
-        aria-selected="${s.id === state.tab}" title="${esc(s.title)} (${i + 1})">${esc(s.title)}${
-        n ? `<span class="count" aria-label="${n} new">${n}</span>` : ""
-      }</button>`;
-    })
-    .join("");
+  $("#tabs").innerHTML = TABS.map(
+    (t, i) => `<button type="button" class="tab" role="tab" data-action="tab" data-id="${t.id}" aria-selected="${t.id === state.tab}" title="${esc(t.title)} (${i + 1})">${esc(
+      t.title
+    )}</button>`
+  ).join("");
 }
 
 function subnav(items, active, tab) {
-  return `<div class="subnav" role="toolbar" aria-label="Topics">${items
+  return `<div class="subnav" role="toolbar" aria-label="Leagues">${items
     .map(
       (it) =>
-        `<button type="button" class="chip" data-action="sub" data-tab="${tab}" data-id="${it.id}" aria-pressed="${
-          it.id === active
-        }">${esc(it.title)}</button>`
+        `<button type="button" class="chip" data-action="sub" data-tab="${tab}" data-id="${it.id}" aria-pressed="${it.id === active}">${esc(it.title)}</button>`
     )
     .join("")}</div>`;
 }
@@ -229,83 +188,6 @@ const skeleton = (rows = 6) => `<div class="skeleton" aria-label="Loading">${"<d
 
 function errorBox(what, msg) {
   return `<p class="error">${esc(what)} could not be loaded: ${esc(msg)}. Press Refresh to try again.</p>`;
-}
-
-/* ================================================================ rendering: stories */
-
-function story(it, compact = false) {
-  const meta = [`<span class="src">${esc(it.source)}</span>`, `<time datetime="${new Date(it.ts * 1000).toISOString()}">${timeAgo(it.ts)}</time>`];
-  if (it.points != null) meta.push(`<span>${it.points.toLocaleString("en")} points</span>`);
-  if (it.comments_url) {
-    const c = it.comments != null ? `${it.comments.toLocaleString("en")} comments` : "Comments";
-    meta.push(`<a href="${esc(it.comments_url)}" target="_blank" rel="noopener">${c}</a>`);
-  }
-  return `<article class="story${isNew(it) ? " is-new" : ""}">
-    <a class="story-title" href="${esc(it.link)}" target="_blank" rel="noopener">${esc(it.title)}</a>
-    ${!compact && it.summary ? `<p class="story-summary">${esc(it.summary)}</p>` : ""}
-    <div class="meta">${meta.join("")}</div>
-  </article>`;
-}
-
-function topicGroup(t, { limit, tab, showMore = true, compact = false } = {}) {
-  const items = limit ? t.items.slice(0, limit) : t.items;
-  const more =
-    showMore && limit && t.items.length > limit
-      ? `<button type="button" class="text-btn" data-action="sub" data-tab="${tab}" data-id="${t.id}">See all ${t.items.length}</button>`
-      : "";
-  return `<section class="group">
-    <div class="group-head"><h2 class="group-title">${esc(t.title)}</h2>${more}</div>
-    ${items.length ? items.map((i) => story(i, compact)).join("") : `<p class="empty">Nothing new here in the last few days.</p>`}
-  </section>`;
-}
-
-function railTopic(t) {
-  return `<section class="rail-block compact">
-    <div class="rail-head"><h2>${esc(t.title)}</h2></div>
-    ${t.items.length ? t.items.map((i) => story(i, true)).join("") : `<p class="empty">Nothing to show yet.</p>`}
-  </section>`;
-}
-
-function renderNewsSection(id) {
-  const sec = state.meta.sections.find((s) => s.id === id);
-  const data = state.news[id];
-  const mainTopics = sec.topics.filter((t) => t.placement !== "rail");
-  const active = state.sub[id] && (state.sub[id] === "all" || mainTopics.some((t) => t.id === state.sub[id])) ? state.sub[id] : "all";
-  const nav = subnav([{ id: "all", title: "All" }, ...mainTopics], active, id);
-
-  let main;
-  let rail = "";
-  if (!data) {
-    main = state.errors[`news:${id}`] ? errorBox(sec.title, state.errors[`news:${id}`]) : skeleton(10);
-  } else {
-    const topics = data.topics.filter((t) => t.placement !== "rail");
-    main =
-      active === "all"
-        ? topics.map((t) => topicGroup(t, { limit: 5, tab: id })).join("")
-        : topicGroup(topics.find((t) => t.id === active) || topics[0], { tab: id });
-    rail = data.topics.filter((t) => t.placement === "rail").map(railTopic).join("");
-  }
-  if (id === "other") rail = marketsPanel() + rail;
-  return nav + `<div class="layout"><div class="main">${main}</div>${rail ? `<aside class="rail">${rail}</aside>` : ""}</div>`;
-}
-
-/* ================================================================ rendering: markets */
-
-function marketsPanel() {
-  const m = state.markets;
-  let body;
-  if (!m) body = state.errors.markets ? `<p class="empty">Market data is unavailable right now.</p>` : skeleton(4);
-  else if (!m.quotes.length) body = `<p class="empty">Market data is unavailable right now.</p>`;
-  else
-    body = `<div class="quotes">${m.quotes
-      .map(
-        (q) => `<div class="quote"><span class="q-label">${esc(q.label)}</span><span class="q-last">${esc(q.last)}</span><span class="q-pct ${q.dir}">${esc(
-          q.pct
-        )}</span></div>`
-      )
-      .join("")}</div>`;
-  const note = m?.fetched ? `<p class="panel-note">Checked ${clock(m.fetched)}. Quotes can be delayed.</p>` : "";
-  return `<section class="panel"><div class="panel-head"><h2>Markets</h2></div>${body}${note}</section>`;
 }
 
 /* ================================================================ rendering: sports */
@@ -393,13 +275,6 @@ function standingsPanel(L, league) {
   </section>`;
 }
 
-function sportsNews(topicId) {
-  const d = state.news.sports;
-  if (!d) return state.errors["news:sports"] ? errorBox("Sports news", state.errors["news:sports"]) : skeleton(6);
-  const t = d.topics.find((x) => x.id === topicId);
-  return t ? topicGroup(t, { showMore: false }) : "";
-}
-
 function renderLeague(tab) {
   const L = state.leagues[tab.league];
   let scores, standings;
@@ -411,7 +286,7 @@ function renderLeague(tab) {
     scores = scoreboard(L, tab.league);
     standings = standingsPanel(L, tab.league);
   }
-  return `<div class="layout"><div class="main">${scores}${sportsNews(tab.topic)}</div><aside class="rail">${standings}</aside></div>`;
+  return `<div class="layout"><div class="main">${scores}</div><aside class="rail">${standings}</aside></div>`;
 }
 
 /* ================================================================ rendering: fantasy */
@@ -535,16 +410,10 @@ function renderFantasy() {
   return `<div class="layout"><div class="main">${injuryPanel()}</div><aside class="rail">${performersPanel()}${leadersPanel()}</aside></div>`;
 }
 
-function renderSports() {
-  const active = SPORT_TABS.some((t) => t.id === state.sub.sports) ? state.sub.sports : "euroleague";
-  const nav = subnav(SPORT_TABS, active, "sports");
-  const tab = SPORT_TABS.find((t) => t.id === active);
-  if (tab.id === "fantasy") return nav + renderFantasy();
-  if (tab.id === "picks") return nav + renderPicks();
-  if (tab.id === "team") return nav + renderTeam();
-  return nav + renderLeague(tab);
+function renderScores() {
+  const active = LEAGUES.some((t) => t.id === state.sub.scores) ? state.sub.scores : "euroleague";
+  return subnav(LEAGUES, active, "scores") + renderLeague(LEAGUES.find((t) => t.id === active));
 }
-
 
 /* ================================================================ rendering: picks */
 
@@ -875,7 +744,8 @@ function render() {
   const view = $("#view");
   const focused = document.activeElement?.id;
   const caret = focused === "inj-search" || focused === "pick-q" ? document.activeElement.selectionStart : null;
-  view.innerHTML = state.tab === "sports" ? renderSports() : renderNewsSection(state.tab);
+  const views = { team: renderTeam, picks: renderPicks, form: renderFantasy, scores: renderScores };
+  view.innerHTML = (views[state.tab] || renderTeam)();
   if (focused === "inj-search" || focused === "pick-q") {
     const el = $(`#${focused}`);
     if (el) {
@@ -946,9 +816,8 @@ document.addEventListener("input", (e) => {
 
 document.addEventListener("keydown", (e) => {
   if (e.metaKey || e.ctrlKey || e.altKey || e.target.matches("input, textarea")) return;
-  const sections = state.meta?.sections || [];
   const n = Number(e.key);
-  if (n >= 1 && n <= sections.length) go(sections[n - 1].id);
+  if (n >= 1 && n <= TABS.length) go(TABS[n - 1].id);
   else if (e.key === "r" || e.key === "R") refresh();
 });
 
@@ -980,7 +849,6 @@ function setupNameplate() {
 
 async function boot() {
   setupNameplate();
-  initVisit();
   readHash();
   try {
     state.meta = await api("meta");
@@ -998,7 +866,7 @@ async function boot() {
     for (const [lg, L] of Object.entries(state.leagues)) {
       if (L.rounds.some((r) => r.games.some((g) => g.state === "in"))) load("sports", lg);
     }
-    renderMasthead(); // keeps "x min ago" and the greeting honest
+    renderMasthead(); // keeps the greeting honest
   }, 60_000);
 }
 

@@ -1,6 +1,0 @@
-[Unit]
-Description=Fantasy: sync stats and prices after EuroLeague rounds
-
-[Service]
-Type=oneshot
-ExecStart=%h/.local/bin/fantasy sync

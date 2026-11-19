@@ -23,3 +23,12 @@ venv/
 # Common local/editor files
 .DS_Store
 *.log
+
+# Each of these folders is its own repository (see README.md)
+/basketaki/
+/clang/
+/compilers/
+/datastructs/
+/fantasy/
+/riscv/
+/teamUp/

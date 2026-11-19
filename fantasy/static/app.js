@@ -94,7 +94,7 @@ const state = {
   perfRound: null,
   injFilter: store.get("wn.injFilter", "all"),
   picks: null,
-  pick: { round: null, sort: "xfp", dir: -1, pos: "all", max: null, q: "", hideOut: true, open: null },
+  pick: { round: null, sort: "xfp", dir: -1, pos: "all", max: null, q: "", hideOut: true, tipped: false, open: null },
   injQuery: "",
   loadedAt: null,
   refreshing: false,
@@ -161,6 +161,13 @@ function renderMasthead() {
   if (P?.lock && P.round === P.next_round) {
     const when = new Date(P.lock * 1000).toLocaleString("en-GB", { weekday: "long", hour: "2-digit", minute: "2-digit" });
     line += ` Round ${P.round} lineups lock ${when}.`;
+  }
+  const sync = P?.sync;
+  if (sync?.stats_at || sync?.prices_at) {
+    if (sync.stats_at && sync.prices_at) line += ` Round ${sync.round} stats and new prices are synced.`;
+    else if (sync.prices_at) line += ` Round ${sync.round} new prices are synced.`;
+    else if (sync.prices_missed) line += ` Round ${sync.round} stats are synced; no new prices appeared before the next round.`;
+    else line += ` Round ${sync.round} stats are synced; new prices are not out yet.`;
   }
   $("#greeting").innerHTML = line;
   $("#updated").textContent = state.refreshing ? "Refreshing…" : state.loadedAt ? `Updated ${clock(state.loadedAt)}` : "";
@@ -378,7 +385,7 @@ function performersPanel() {
     .map(
       (p, i) => `<div class="perf">
       <span class="rank">${i + 1}</span>
-      <span class="who">${esc(p.name)}<span class="team-code">${esc(p.team)}</span>${flagFor(p.key, idx)}</span>
+      <span class="who">${tipName(p)}<span class="team-code">${esc(p.team)}</span>${flagFor(p.key, idx)}</span>
       <span class="pir">${p.pir}<small>PIR</small></span>
       <span class="line">${p.pts} pts, ${p.reb} reb, ${p.ast} ast in ${p.min} min</span>
     </div>`
@@ -393,7 +400,7 @@ function leadersPanel() {
   const idx = injuryIndex();
   const rows = F.leaders
     .map(
-      (p, i) => `<tr><td>${i + 1}</td><td class="l"><span class="strong">${esc(p.name)}</span> <span class="muted">${esc(p.team)}</span>${flagFor(
+      (p, i) => `<tr><td>${i + 1}</td><td class="l">${tipName(p, "strong")} <span class="muted">${esc(p.team)}</span>${flagFor(
         p.key,
         idx
       )}</td><td class="muted">${p.gp}</td><td class="muted">${p.min}</td><td class="strong">${p.pir}</td></tr>`
@@ -431,6 +438,32 @@ function matchupCell(r) {
   return `<span class="${cls}" title="Opponent ranks #${r.dvp_rank} of 20 for PIR allowed to this position (1 = most generous)">${pct > 0 ? "+" : ""}${pct}%</span>`;
 }
 
+/* Tips: players the fantasy columns keep recommending (see newsdesk/tips.py).
+   A headline pick counts double; a score of 2+ gets the highlighter. */
+const TIP_MIN = 2;
+const tipById = (id) => state.picks?.tips?.players?.[id];
+const tipOf = (r) => tipById(pid(r));
+const isTipped = (t) => !!t && t.score >= TIP_MIN;
+
+function tipTitle(t) {
+  return t.items.map((i) => `${i.source}${i.how === "headline" ? " headline" : i.how === "in the article" ? "" : ` ${i.how}`}: ${i.title}`).join("\n");
+}
+
+/* The player's name, highlighted when he is often tipped. */
+function tipName(r, cls = "", text = r.name) {
+  const t = tipOf(r);
+  return isTipped(t)
+    ? `<span class="${cls} tipped" title="${esc(`Recommended in ${t.count} recent tip article${t.count > 1 ? "s" : ""}:\n${tipTitle(t)}`)}">${esc(text)}</span>`
+    : cls
+    ? `<span class="${cls}">${esc(text)}</span>`
+    : esc(text);
+}
+
+function tipBadge(r) {
+  const t = tipOf(r);
+  return isTipped(t) ? `<span class="tip-badge" title="${esc(tipTitle(t))}">${t.count} tip${t.count > 1 ? "s" : ""}</span>` : "";
+}
+
 function statusFlag(r) {
   if (!r.status) return "";
   return `<span class="flag st-${r.severity ?? 2}">${esc(r.status)}</span>`;
@@ -441,7 +474,7 @@ function pickLine(r, i, metric) {
   const big = metric === "value" ? `${fmt(r.value, 2)}<small>pts/cr</small>` : `${fmt(r.xfp)}<small>exp pts</small>`;
   return `<div class="perf">
     <span class="rank">${i + 1}</span>
-    <span class="who">${esc(r.name)}<span class="team-code">${esc(r.team)}</span>${statusFlag(r)}</span>
+    <span class="who">${tipName(r)}<span class="team-code">${esc(r.team)}</span>${statusFlag(r)}</span>
     <span class="pir">${big}</span>
     <span class="line">${fixture}, ${fmt(r.price)} cr${metric === "pop" || metric === "fade" ? `, ${fmt(r.popularity)}% own` : `, ${r.win}% win`}${
       metric === "value" ? `, ${fmt(r.xfp)} pts` : ""
@@ -485,6 +518,19 @@ function gameBars(r) {
   <p class="legend"><span class="key key-el"></span>EuroLeague <span class="key key-dom"></span>Domestic league or cup <span class="key key-proj"></span>This projection</p>`;
 }
 
+function tipDetail(r) {
+  const t = tipOf(r);
+  if (!t) return "";
+  const day = (ts) => new Date(ts * 1000).toLocaleDateString("en-GB", { day: "numeric", month: "short" });
+  const how = (i) =>
+    i.how === "headline" ? "in the headline" : i.how === "in the article" ? "" : i.how === "trap" ? "listed as a trap: popular but overpriced" : `listed as a ${i.how}`;
+  const item = (i, warn) => `<li${warn ? ` class="tip-warn"` : ""}><a href="${esc(i.link)}" target="_blank" rel="noopener">${esc(i.source)}, ${esc(i.title)}</a> <span class="muted">${day(i.ts)}${
+    how(i) ? `, ${esc(how(i))}` : ""
+  }</span>${i.quote ? `<q>${esc(i.quote)}</q>` : ""}</li>`;
+  return `<h4 class="tip-h">${isTipped(t) ? `<span class="tipped">Often tipped</span>` : "Tipped"}</h4>
+    <ul class="tips">${t.items.map((i) => item(i, false)).join("")}${t.warnings.map((i) => item(i, true)).join("")}</ul>`;
+}
+
 function pickDetail(r) {
   const reasons = r.reasons.length ? `<ul class="reasons">${r.reasons.map((x) => `<li>${esc(x)}</li>`).join("")}</ul>` : `<p class="pick-note">No special factors: a straight read of minutes, rate and matchup.</p>`;
   const rank = (v, n) => (v == null ? "–" : `${fmt(v)} (${n}${n === 1 ? "st" : n === 2 ? "nd" : n === 3 ? "rd" : "th"})`);
@@ -502,7 +548,7 @@ function pickDetail(r) {
     ["FantasyEdgeIQ projection", fmt(r.feiq_proj)],
   ];
   return `<div class="pick-detail">
-    <div class="pd-chart"><h4>Last games</h4>${gameBars(r)}</div>
+    <div class="pd-chart"><h4>Last games</h4>${gameBars(r)}${tipDetail(r)}</div>
     <div class="pd-why"><h4>Why ${fmt(r.proj)}</h4>${reasons}
       <dl class="facts">${facts.map(([k, v]) => `<div><dt>${esc(k)}</dt><dd>${v}</dd></div>`).join("")}</dl>
       <p class="pick-note">Ratings are points per 100 possessions. Offence rank 1 scores most; defence rank 1 allows most, so it is the easiest to score against.</p>
@@ -537,6 +583,7 @@ function picksTable() {
       (f.pos === "all" || r.pos === f.pos) &&
       (!f.max || r.price <= f.max + 1e-9) &&
       (!f.hideOut || !(r.severity === 0 || r.proj === 0)) &&
+      (!f.tipped || isTipped(tipOf(r))) &&
       (!q || r.name.toLowerCase().includes(q) || r.team.toLowerCase().includes(q) || r.opp.toLowerCase().includes(q))
   );
   const k = f.sort;
@@ -557,7 +604,7 @@ function picksTable() {
       const open = f.open === id;
       const chg = r.price_change ? `<span class="${r.price_change > 0 ? "up" : "down"} chg">${signed(r.price_change)}</span>` : "";
       const row = `<tr class="prow${open ? " open" : ""}${(r.severity ?? 3) <= 1 ? " out" : ""}" data-action="popen" data-id="${esc(id)}" tabindex="0" aria-expanded="${open}">
-        <td class="l"><span class="strong">${esc(r.name)}</span> <span class="muted">${esc(r.team)} ${r.pos}</span>${statusFlag(r)}</td>
+        <td class="l">${tipName(r, "strong")} <span class="muted">${esc(r.team)} ${r.pos}</span>${statusFlag(r)}${tipBadge(r)}</td>
         <td class="l muted">${r.home ? "vs" : "at"} ${esc(r.opp)}</td>
         <td>${fmt(r.price)}${chg}</td>
         <td class="strong">${fmt(r.xfp)}</td>
@@ -643,13 +690,13 @@ function coachPanel(coaches) {
     .map(
       (c) => `<tr><td class="l"><span class="strong">${esc(c.name)}</span> <span class="muted">${esc(c.team)}</span></td><td class="l muted">${c.home ? "vs" : "at"} ${esc(c.opp)}</td><td>${fmt(
         c.price
-      )}</td><td class="strong">${c.win}%</td><td class="muted">${fmt(c.popularity)}%</td></tr>`
+      )}</td><td class="strong">${fmt(c.xfp)}</td><td>${c.win}%</td><td class="muted">${fmt(c.popularity)}%</td></tr>`
     )
     .join("");
   return `<section class="panel">
     <div class="panel-head"><h2>Coaches</h2></div>
-    <table class="table coach-t"><thead><tr><th class="l">Coach</th><th class="l">Next</th><th>Price</th><th>Win</th><th>Owned</th></tr></thead><tbody>${rows}</tbody></table>
-    <p class="panel-note">Coaches score on results, so they are ranked by win chance from this season's point margins plus home court.</p>
+    <table class="table coach-t"><thead><tr><th class="l">Coach</th><th class="l">Next</th><th>Price</th><th>Exp. pts</th><th>Win</th><th>Owned</th></tr></thead><tbody>${rows}</tbody></table>
+    <p class="panel-note">Coaches score on the final margin: win by 21+ is +25, 11–20 +20, 1–10 +10; lose by up to 10 is −5, 11–20 −10, 21+ −20. Ranked by expected points, from this season's point margins plus home court.</p>
   </section>`;
 }
 
@@ -663,12 +710,44 @@ function captainStrip(keys, by) {
       .map(
         (r, i) => `<div class="cap">
         <span class="cap-rank">${["First choice", "Second choice", "Third choice"][i]}</span>
-        <span class="cap-name">${esc(r.name)} <span class="team-code">${esc(r.team)}</span></span>
+        <span class="cap-name">${tipName(r)} <span class="team-code">${esc(r.team)}</span></span>
         <span class="cap-pts">${fmt(r.xfp * 2)}<small> expected as captain</small></span>
         <span class="cap-line">${r.home ? "vs" : "at"} ${esc(r.opp)}, ${r.win}% win, range ${fmt(r.floor)} to ${fmt(r.ceil)} PIR, ${fmt(r.price)} cr</span>
       </div>`
       )
       .join("")}</div>
+  </section>`;
+}
+
+function tipsPanel(P, by) {
+  const T = P.tips;
+  if (!T) return "";
+  const rows = Object.entries(T.players || {})
+    .filter(([, t]) => isTipped(t))
+    .map(([id, t]) => [by.get(id), t])
+    .filter(([r]) => r)
+    .sort((a, b) => b[1].score - a[1].score || b[0].xfp - a[0].xfp);
+  const eh = T.sources.filter((s) => s.source === "Eurohoops").length;
+  const others = [...new Set(T.sources.filter((s) => s.source !== "Eurohoops").map((s) => s.source))];
+  const srcNote = `${eh} Eurohoops column${eh === 1 ? "" : "s"}${others.length ? ` and the ${others.join(", ")} round preview` : ""} from the last ${Math.round(T.window_days / 7)} weeks`;
+  const err = T.errors?.length ? ` <span class="st-1">Could not read: ${esc(T.errors.join("; "))}.</span>` : "";
+  const list = rows.length
+    ? rows
+        .map(([r, t]) => {
+          const latest = t.items.slice().sort((a, b) => b.ts - a.ts)[0];
+          return `<tr><td class="l">${tipName(r, "strong")} <span class="muted">${esc(r.team)} ${r.pos}</span>${statusFlag(r)}</td><td class="strong">${t.count}</td><td class="muted">${t.headline || "–"}</td>
+          <td class="l tip-latest"><a href="${esc(latest.link)}" target="_blank" rel="noopener">${esc(latest.source)}: ${esc(latest.title)}</a></td><td>${fmt(r.price)}</td><td class="strong">${fmt(r.xfp)}</td><td>${fmt(r.value, 2)}</td></tr>`;
+        })
+        .join("")
+    : `<tr><td colspan="7" class="l muted">No player has been tipped more than once lately.</td></tr>`;
+  return `<section class="group">
+    <div class="group-head"><h2 class="group-title">Often tipped</h2></div>
+    <p class="prose">Players the fantasy tip columns keep recommending, from ${srcNote}. They are <span class="tipped">highlighted</span> everywhere on the site. Our own numbers sit beside them, so you can see whether the tip still adds up this round.${err}</p>
+    <div class="tablewrap"><table class="table named tips-t">
+      <thead><tr><th class="l">Player</th><th>Articles</th><th>Headlines</th><th class="l tip-latest">Latest tip</th><th>Price</th><th>Exp. pts</th><th>Pts/cr</th></tr></thead>
+      <tbody>${list}</tbody>
+    </table></div>
+    <p class="pick-note">Counted when a column names him in its headline (worth two) or pitches him in the text, and not when it only says he is out or missing. A player needs two to be highlighted. BasketNews, RotoWire and the EuroLeague site publish no Fantasy Challenge tips this season. The tips do not change the projections.</p>
   </section>`;
 }
 
@@ -680,7 +759,7 @@ function wildcardPanel(P, by) {
     const r = by.get(id);
     if (!r) return "";
     const mult = role === "Captain" ? 2 : role === "Bench" ? 0.5 : 1;
-    return `<tr><td class="l">${role}</td><td class="l"><span class="strong">${esc(r.name)}</span> <span class="muted">${esc(r.team)} ${r.pos}</span>${statusFlag(r)}</td><td class="l muted">${
+    return `<tr><td class="l">${role}</td><td class="l">${tipName(r, "strong")} <span class="muted">${esc(r.team)} ${r.pos}</span>${statusFlag(r)}</td><td class="l muted">${
       r.home ? "vs" : "at"
     } ${esc(r.opp)}</td><td>${fmt(r.price)}</td><td class="strong">${fmt(r.xfp * mult)}</td></tr>`;
   };
@@ -742,7 +821,7 @@ function renderPicks() {
       <div>
         <h2 class="picks-title">Round ${P.round} picks</h2>
         <p class="picks-sub">${P.round === P.next_round ? "Lineups lock" : "First tip-off"} ${esc(lock)}. Expected fantasy points for each player's next EuroLeague game, against his price in credits.</p>
-        <p class="pick-note">Scoring: PIR, plus 10% when his team wins. Captain ×2, the other four starters and sixth man ×1, bench ×0.5. Coaches score on the result.</p>
+        <p class="pick-note">Scoring: PIR, plus 10% when his team wins. Captain ×2, the other four starters and sixth man ×1, bench ×0.5. Coaches score on the margin: +25 / +20 / +10 for wins by 21+ / 11–20 / 1–10, −5 / −10 / −20 for losses by up to 10 / 11–20 / 21+.</p>
       </div>
       ${roundSwitch}
     </div>
@@ -756,6 +835,8 @@ function renderPicks() {
       ${pickList("Fades", "Popular picks that are out, doubtful or poor value this round.", P.lists.fades, by, "fade")}
     </div>
 
+    ${tipsPanel(P, by)}
+
     ${wildcardPanel(P, by)}
 
     <section class="group">
@@ -766,6 +847,7 @@ function renderPicks() {
     state.pick.max
   )} cr</span></label>
         <label class="check"><input id="pick-out" type="checkbox" ${state.pick.hideOut ? "checked" : ""}> Hide players ruled out</label>
+        <label class="check"><input id="pick-tipped" type="checkbox" ${state.pick.tipped ? "checked" : ""}> Only <span class="tipped">often tipped</span></label>
         <input class="search" id="pick-q" type="search" placeholder="Find a player, team or opponent" value="${esc(state.pick.q)}" aria-label="Find a player, team or opponent">
       </div>
       <div id="picks-table">${picksTable()}</div>
@@ -856,13 +938,14 @@ document.addEventListener("keydown", (e) => {
 
 document.addEventListener("input", (e) => {
   const t = e.target;
-  if (t.id === "pick-q" || t.id === "pick-max" || t.id === "pick-out") {
+  if (t.id === "pick-q" || t.id === "pick-max" || t.id === "pick-out" || t.id === "pick-tipped") {
     if (t.id === "pick-q") state.pick.q = t.value;
     if (t.id === "pick-max") {
       state.pick.max = Number(t.value);
       $("#pick-max-label").textContent = `${state.pick.max.toFixed(1)} cr`;
     }
     if (t.id === "pick-out") state.pick.hideOut = t.checked;
+    if (t.id === "pick-tipped") state.pick.tipped = t.checked;
     $("#picks-table").innerHTML = picksTable();
     return;
   }

@@ -16,7 +16,7 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-from newsdesk import fantasy, optimize, picks, sports
+from newsdesk import fantasy, optimize, picks, roundsync, sports, tips
 from newsdesk.cache import Cache
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
@@ -103,15 +103,24 @@ def get_injuries(force=False):
     return cache.get("fantasy:injuries", 30 * 60, lambda: fantasy.injuries(cfg["injury_report_url"]), force)
 
 
-def picks_inputs(force=False):
-    """Everything the projection model reads, from cache where possible."""
-    season = sports.el_season()
-    games = cache.get(
+def get_tips(force=False):
+    """Recent fantasy tip articles; retried sooner when a source failed."""
+    return cache.get("tips:sources", lambda d: 15 * 60 if d.get("errors") else 2 * 3600, tips.fetch_sources, force)
+
+
+def season_games(season, force=False):
+    return cache.get(
         f"el:games:{season}",
         lambda gs: 60 if any(g["state"] == "in" for g in gs) else 10 * 60,
         lambda: sports.el_games(season),
         force,
     )
+
+
+def picks_inputs(force=False):
+    """Everything the projection model reads, from cache where possible."""
+    season = sports.el_season()
+    games = season_games(season, force)
     finished = [g for g in games if g["state"] == "post"]
     list(fantasy._BOX_POOL.map(lambda g: cached_box(season, g), finished))  # fill the cache in parallel
     logs = picks.el_logs(games, lambda g: cached_box(season, g))
@@ -136,14 +145,15 @@ PRICES_PATH = os.path.join(os.path.dirname(TRACK_DIR), "prices.jsonl")
 _prices_logged = {"day": None}
 
 
-def log_prices(players):
-    """Append one snapshot of official prices per day. Prices move with
-    performance; a season of history lets the tool learn how."""
+def log_prices(players, force=False):
+    """Append one snapshot of official prices per day, plus one whenever a
+    round's price update lands (force). Prices move with performance; a season
+    of history lets the tool learn how."""
     day = time.strftime("%Y-%m-%d")
-    if _prices_logged["day"] == day:
+    if not force and _prices_logged["day"] == day:
         return
     try:
-        if os.path.exists(PRICES_PATH):
+        if not force and os.path.exists(PRICES_PATH):
             line = ""
             with open(PRICES_PATH) as f:
                 for line in f:
@@ -251,6 +261,12 @@ def get_picks(rnd=None, force=False):
         log.warning("wildcard failed: %s", e)
         wc = None
     lists = picks.suggestions(rows)
+    try:
+        src = get_tips(force)
+        tip_map, tip_sources, tip_errors = tips.tally(src, rows), tips.used(src), src.get("errors", [])
+    except Exception as e:  # noqa: BLE001 - picks work without tips
+        log.warning("tips failed: %s", e)
+        tip_map, tip_sources, tip_errors = {}, [], [str(e)]
     if rnd == target and lock and time.time() < lock:
         try:
             picks.save_snapshot(TRACK_DIR, {"round": rnd, "players": rows, "lists": lists})
@@ -266,7 +282,9 @@ def get_picks(rnd=None, force=False):
         "scoring": {"win_bonus": picks.WIN_BONUS, "slots": picks.SLOTS},
         "track": picks.track_record(TRACK_DIR, logs, games),
         "wildcard": wc,
+        "sync": roundsync.status(load_round_sync()),
         "team_backtest": team_backtest(inp, done),
+        "tips": {"players": tip_map, "sources": tip_sources, "errors": tip_errors, "window_days": tips.WINDOW_DAYS},
         "coaches": picks.coach_rows(feiq["players"], games, rnd),
         "teams": info,
         "context": {"home_edge": round(built["home_edge"], 3), "rate": {k: round(v, 3) for k, v in built["rate"].items()}},
@@ -433,6 +451,20 @@ def get_live_team():
             "won": ((g.get("winner") == "home") == bool(home)) if g and g["state"] == "post" else None,
             "score": [g["home"]["score"], g["away"]["score"]] if g and g["state"] != "pre" else None,
         }
+        crow = next((c for c in picks.coach_rows(inp["feiq"]["players"], inp["games"], rnd) if f"{c['key']}|{c['team']}" == team["coach"]), {})
+        coach["xfp"] = crow.get("xfp", 0.0)
+        coach["margin"] = None
+        coach["fp"] = None
+        if coach["score"]:
+            h, a = coach["score"]
+            coach["margin"] = (h - a) if home else (a - h)
+            coach["fp"] = picks.coach_points(coach["margin"])
+    if coach and coach["state"] == "post":
+        banked += coach["fp"]
+    elif coach and coach["state"] == "in":
+        live_now += coach["fp"]
+    elif coach:
+        to_come += coach["xfp"]
     last_tip = max((r["tip"] for r in rows if r["state"] in ("in", "post") and r["tip"]), default=None)
     checkpoint = checkpoint_lineup(live, last_tip)
     subs = picks.gameday_subs(lineup, entries, base=checkpoint)
@@ -574,6 +606,68 @@ def get_meta():
     return {"name": cfg.get("name", ""), "favorite_teams": cfg.get("favorite_teams", [])}
 
 
+ROUND_SYNC_PATH = os.path.join(os.path.dirname(TRACK_DIR), "round-sync.json")
+
+
+def load_round_sync():
+    try:
+        with open(ROUND_SYNC_PATH) as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return None
+
+
+def refetch_boxes(season, games):
+    """Fetch these games' box scores again; True when every one came back.
+    An empty or failed fetch keeps the box score we already have."""
+    started = time.time()
+
+    def one(g):
+        key = f"box4:{season}:{g['id']}"
+
+        def fetch():
+            lines = fantasy.box_score(season, g)
+            if not lines:
+                raise ValueError(f"empty box score for game {g['id']}")
+            return lines
+
+        try:
+            cache.get(key, float("inf"), fetch, force=True)
+        except Exception:  # noqa: BLE001 - no earlier copy either; retried next time
+            return False
+        return (cache.fetched_at(key) or 0) >= started
+
+    return all(list(fantasy._BOX_POOL.map(one, games)))
+
+
+def round_sync():
+    """After each round: settled stats once, then new prices when they land.
+    Only runs when asked (`fantasy sync`, on a timer), so it reads fresh data
+    instead of whatever happens to be cached."""
+    season = sports.el_season()
+    feiq = cache.get("picks:feiq", 60 * 60, picks.feiq_players, True)
+    prices = {f"{p['key']}|{p['team']}": p["price"] for p in feiq["players"]}
+    state, report = roundsync.advance(
+        load_round_sync(), season, season_games(season, True), prices, time.time(),
+        lambda games: refetch_boxes(season, games),
+        lambda ts: roundsync.price_baseline(PRICES_PATH, ts),
+    )
+    os.makedirs(os.path.dirname(ROUND_SYNC_PATH), exist_ok=True)
+    tmp = ROUND_SYNC_PATH + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(state, f)
+    os.replace(tmp, ROUND_SYNC_PATH)
+    if not (report["stats"] or report["prices"]):
+        return
+    log.info("round sync: stats for %s, prices for %s", report["stats"] or "-", report["prices"] or "-")
+    if report["prices"]:
+        log_prices(feiq["players"], force=True)
+    if report["stats"]:
+        _quiet(lambda: get_fantasy(force=True))
+    cache.drop("picks:rows:")  # projections built on the old numbers
+    _quiet(get_picks)
+
+
 def keep_picks_fresh():
     """Recompute picks every 30 minutes so the saved pre-lock snapshot is
     always close to the real lineup lock."""
@@ -670,6 +764,9 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(save_live_lineup(body))
             if parts == ["api", "myteam", "suggest"]:
                 return self._json(suggest_transfers(body))
+            if parts == ["api", "sync"]:
+                round_sync()
+                return self._json({"sync": roundsync.status(load_round_sync())})
             return self._error(404, "Unknown endpoint")
         except ValueError as e:
             return self._error(400, str(e))
@@ -709,7 +806,12 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--port", type=int, default=None)
     ap.add_argument("--no-warmup", action="store_true")
+    ap.add_argument("--sync", action="store_true", help="run the post-round sync once and exit")
     args = ap.parse_args()
+    if args.sync:
+        round_sync()
+        cache._save()
+        return
     port = args.port or int(config().get("port", 8420))
     httpd = ThreadingHTTPServer(("127.0.0.1", port), Handler)
     httpd.daemon_threads = True

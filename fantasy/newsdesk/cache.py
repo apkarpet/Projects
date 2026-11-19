@@ -25,6 +25,7 @@ class Cache:
         self._locks = defaultdict(threading.Lock)
         self._mu = threading.Lock()
         self._save_timer = None
+        self._save_lock = threading.Lock()  # two savers would share the .tmp file
         self._load()
 
     def _load(self):
@@ -47,12 +48,13 @@ class Cache:
             snapshot = dict(self.data)
         os.makedirs(os.path.dirname(self.path), exist_ok=True)
         tmp = self.path + ".tmp"
-        try:
-            with open(tmp, "w") as f:
-                json.dump(snapshot, f)
-            os.replace(tmp, self.path)
-        except OSError as e:
-            log.warning("cache save failed: %s", e)
+        with self._save_lock:
+            try:
+                with open(tmp, "w") as f:
+                    json.dump(snapshot, f)
+                os.replace(tmp, self.path)
+            except OSError as e:
+                log.warning("cache save failed: %s", e)
 
     def _lock(self, key):
         with self._mu:
@@ -98,6 +100,13 @@ class Cache:
         threading.Thread(
             target=self._refresh, args=(key, fn, time.time()), daemon=True
         ).start()
+
+    def drop(self, prefix):
+        """Forget every entry whose key starts with prefix."""
+        for key in list(self.data):
+            if key.startswith(prefix):
+                self.data.pop(key, None)
+        self._save_soon()
 
     def fetched_at(self, key):
         entry = self.data.get(key)

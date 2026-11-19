@@ -675,8 +675,28 @@ def win_prob(ratings, team, opp, home):
     return 0.5 * (1 + math.erf(spread / (MARGIN_SD * math.sqrt(2)))), spread
 
 
+# coach points by final margin: (lowest margin in the band, points)
+COACH_BANDS = [(21, 25), (11, 20), (1, 10), (-10, -5), (-20, -10)]
+COACH_FLOOR = -20  # lost by 21 or more
+
+
+def coach_points(margin):
+    """Coach fantasy points for a final (or current) point margin."""
+    return next((pts for low, pts in COACH_BANDS if margin >= low), COACH_FLOOR)
+
+
+def coach_xfp(spread):
+    """Expected coach points when the margin is normal around the spread.
+    Margins are whole numbers and games can't end level, so the band edges
+    sit at 20.5, 10.5, 0, -10.5 and -20.5."""
+    cdf = lambda x: 0.5 * (1 + math.erf((x - spread) / (MARGIN_SD * math.sqrt(2))))
+    edges = [math.inf, 20.5, 10.5, 0.0, -10.5, -20.5, -math.inf]
+    pts = [p for _, p in COACH_BANDS] + [COACH_FLOOR]
+    return sum(p * (cdf(hi) - cdf(lo)) for p, hi, lo in zip(pts, edges, edges[1:]))
+
+
 def coach_rows(players, games, rnd):
-    """Coaches score on results, so rank them by win chance."""
+    """Coaches score on the result's margin, so rank them by expected points."""
     ratings = team_ratings(games)
     fixtures = _round_games(games, rnd)
     out = []
@@ -698,9 +718,10 @@ def coach_rows(players, games, rnd):
                 "home": home,
                 "win": round(win * 100),
                 "spread": round(spread, 1),
+                "xfp": round(coach_xfp(spread), 1),
             }
         )
-    out.sort(key=lambda c: -c["win"])
+    out.sort(key=lambda c: -c["xfp"])
     return out
 
 

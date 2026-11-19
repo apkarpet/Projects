@@ -276,7 +276,7 @@ function chip(id, role, pool) {
   return `<button type="button" class="${cls}" data-taction="sel" data-id="${esc(id)}" aria-pressed="${sel}">
     ${role === "captain" ? `<span class="pc-badge" title="Captain">C</span>` : ""}
     <span class="pc-top">${crest ? `<img src="${esc(crest)}" alt="" width="18" height="18">` : ""}<span class="pc-pos">${r.pos}</span></span>
-    <span class="pc-name">${esc(lastName(r.name))}</span>
+    ${tipName(r, "pc-name", lastName(r.name))}
     <span class="pc-meta">${r.home ? "vs" : "at"} ${esc(r.opp)}, ${esc(shortTime(r.tip))}</span>
     <span class="pc-pts">${fmt(r.xfp * mult)}<small>${mult === 1 ? "" : mult === 2 ? " ×2" : " ×½"}</small></span>
     <span class="pc-price">${fmt(r.price)} cr${r.status ? ` <span class="st-${r.severity ?? 2}">${esc(r.status)}</span>` : ""}</span>
@@ -330,7 +330,7 @@ function selectionPanel(pool, coaches, totals) {
   if (teamState.swap) return `<div class="sel-panel"><p class="prose">Now select the player to swap places with.</p><button type="button" class="text-btn" data-taction="close">Cancel</button></div>`;
   if (id === d.coach) {
     const c = coaches.get(id);
-    return `<div class="sel-panel"><h3>${esc(c?.name || "Coach")}</h3><p class="pick-note">${c ? `${c.win}% chance to win ${c.home ? "vs" : "at"} ${esc(c.opp)}.` : ""}</p>
+    return `<div class="sel-panel"><h3>${esc(c?.name || "Coach")}</h3><p class="pick-note">${c ? `${fmt(c.xfp)} expected points, ${c.win}% chance to win ${c.home ? "vs" : "at"} ${esc(c.opp)}.` : ""}</p>
       <div class="sel-actions"><button type="button" class="btn" data-taction="sell">Change coach</button><button type="button" class="text-btn" data-taction="close">Done</button></div></div>`;
   }
   const r = pool.get(id);
@@ -360,13 +360,13 @@ function pickerRows() {
   if (pk.coach) {
     return [...coaches.values()]
       .filter((c) => `${c.key}|${c.team}` !== d.coach && (!q || c.name.toLowerCase().includes(q) || c.team.toLowerCase().includes(q)))
-      .sort((a, b) => b.win - a.win)
+      .sort((a, b) => b.xfp - a.xfp)
       .map((c) => {
         const cid = `${c.key}|${c.team}`;
         const ok = c.price <= room + 1e-9;
         return `<tr class="${ok ? "" : "cant"}"><td class="l"><span class="strong">${esc(c.name)}</span> <span class="muted">${esc(c.team)}</span></td><td class="l muted">${c.home ? "vs" : "at"} ${esc(
           c.opp
-        )}</td><td>${fmt(c.price)}</td><td class="strong">${c.win}%</td><td>${
+        )}</td><td>${fmt(c.price)}</td><td class="strong">${fmt(c.xfp)}</td><td>${c.win}%</td><td>${
           ok ? `<button type="button" class="btn small" data-taction="buy" data-id="${esc(cid)}">Buy</button>` : `<span class="muted">Too expensive</span>`
         }</td></tr>`;
       })
@@ -381,7 +381,7 @@ function pickerRows() {
     .map((r) => {
       const rid = `${r.key}|${r.team}`;
       const ok = r.price <= room + 1e-9;
-      return `<tr class="${ok ? "" : "cant"}"><td class="l"><span class="strong">${esc(r.name)}</span> <span class="muted">${esc(r.team)}</span>${statusFlag(r)}</td><td class="l muted">${
+      return `<tr class="${ok ? "" : "cant"}"><td class="l">${tipName(r, "strong")} <span class="muted">${esc(r.team)}</span>${statusFlag(r)}${tipBadge(r)}</td><td class="l muted">${
         r.home ? "vs" : "at"
       } ${esc(r.opp)}</td><td>${fmt(r.price)}</td><td class="strong">${fmt(r.xfp)}</td><td>${fmt(r.value, 2)}</td><td>${
         ok ? `<button type="button" class="btn small" data-taction="buy" data-id="${esc(rid)}">Buy</button>` : `<span class="muted">Too expensive</span>`
@@ -395,7 +395,7 @@ function pickerPanel(pool, coaches, totals) {
   const out = pk.coach ? coaches.get(pk.out) : pool.get(pk.out);
   const room = totals.bank + priceOf(pool, coaches, pk.out);
   const head = pk.coach
-    ? `<tr><th class="l">Coach</th><th class="l">Next</th><th>Price</th><th>Win</th><th></th></tr>`
+    ? `<tr><th class="l">Coach</th><th class="l">Next</th><th>Price</th><th>Exp. pts</th><th>Win</th><th></th></tr>`
     : `<tr><th class="l">Player</th><th class="l">Next</th><th>Price</th><th>Exp. pts</th><th>Pts/cr</th><th></th></tr>`;
   return `<div class="sel-panel">
     <h3>Replace ${esc(out?.name || "")}</h3>
@@ -424,7 +424,7 @@ function suggestionsPanel(pool) {
           .map(([out, inn]) => {
             const a = pool.get(out);
             const b = pool.get(inn);
-            return `<li><span class="muted">Sell</span> ${esc(a?.name || out)} <span class="muted">${fmt(a?.price)}</span> <span class="muted">for</span> ${esc(b?.name || inn)} <span class="muted">${fmt(
+            return `<li><span class="muted">Sell</span> ${a ? tipName(a) : esc(out)} <span class="muted">${fmt(a?.price)}</span> <span class="muted">for</span> ${b ? tipName(b) : esc(inn)} <span class="muted">${fmt(
               b?.price
             )}</span></li>`;
           })
@@ -602,6 +602,9 @@ function livePlayer(id) {
   return teamState.live.players.find((p) => p.id === id);
 }
 
+/* Live ids are "key|team"; tipName wants the parts. */
+const liveRef = (id, p) => ({ key: id.slice(0, id.lastIndexOf("|")), team: id.slice(id.lastIndexOf("|") + 1), name: p.name });
+
 const hasStarted = (id) => ["in", "post"].includes(livePlayer(id)?.state);
 
 /* The lineup at the last tip-off: the rules are judged against it, so changes since then can be undone. */
@@ -661,6 +664,10 @@ function liveTotals() {
     else if (p.state === "in") live += (p.fp || 0) * m;
     else toCome += (p.xfp || 0) * m;
   }
+  const c = teamState.live.coach;
+  if (c?.state === "post") banked += c.fp || 0;
+  else if (c?.state === "in") live += c.fp || 0;
+  else if (c) toCome += c.xfp || 0;
   return { banked, live, toCome, total: banked + live + toCome };
 }
 
@@ -791,7 +798,7 @@ function liveChip(id) {
   return `<button type="button" class="${cls}" data-taction="lsel" data-id="${esc(id)}" aria-pressed="${sel}" ${blocked ? `title="${esc(blocked)}"` : ""}>
     ${role === "captain" ? `<span class="pc-badge" title="Captain">C</span>` : ""}
     <span class="pc-top">${crest ? `<img src="${esc(crest)}" alt="" width="18" height="18">` : ""}<span class="pc-pos">${p.pos || ""}</span></span>
-    <span class="pc-name">${esc(lastName(p.name))}</span>
+    ${tipName(liveRef(id, p), "pc-name", lastName(p.name))}
     <span class="pc-meta">${resultLine(p)}</span>
     <span class="pc-pts">${big}<small> ${small}</small></span>
     <span class="pc-price">${line}</span>
@@ -806,10 +813,17 @@ function liveCourt(L) {
   const c = L.coach;
   let coachChip = "";
   if (c) {
-    const res = c.state === "post" ? `<span class="${c.won ? "up" : "down"}">${c.won ? "Won" : "Lost"}</span>` : c.state === "in" ? `<span class="live">Live</span>` : esc(shortTime(c.tip));
+    const by = c.margin != null ? ` by ${Math.abs(c.margin)}` : "";
+    const res =
+      c.state === "post"
+        ? `<span class="${c.won ? "up" : "down"}">${c.won ? "Won" : "Lost"}${by}</span>`
+        : c.state === "in"
+        ? `<span class="live">${c.margin > 0 ? "Up" : c.margin < 0 ? "Down" : "Level"}${c.margin ? by : ""}</span>`
+        : esc(shortTime(c.tip));
+    const pts = c.state === "post" || c.state === "in" ? `${c.fp > 0 ? "+" : ""}${fmt(c.fp)} <small>${res}</small>` : `${fmt(c.xfp)} <small>expected</small>`;
     coachChip = `<div class="pchip live-chip coach"><span class="pc-top"><span class="pc-pos">Coach</span></span><span class="pc-name">${esc(lastName(c.name || ""))}</span><span class="pc-meta">${
       c.home ? "vs" : "at"
-    } ${esc(c.opp || "")}</span><span class="pc-pts" style="font-size:1rem">${res}</span></div>`;
+    } ${esc(c.opp || "")}${c.state === "pre" ? ` · ${res}` : ""}</span><span class="pc-pts">${pts}</span></div>`;
   }
   return `<div class="court-wrap">
     <div class="court">${COURT}${spots}</div>
@@ -853,7 +867,7 @@ function liveSelectionPanel() {
 
 function liveSubsPanel(L) {
   const s = L.subs;
-  const name = (id) => esc(livePlayer(id)?.name || id);
+  const name = (id) => (livePlayer(id) ? tipName(liveRef(id, livePlayer(id))) : esc(id));
   const day = (ts) => {
     if (!ts) return "";
     const d = new Date(ts * 1000);

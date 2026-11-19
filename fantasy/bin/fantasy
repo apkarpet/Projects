@@ -6,6 +6,7 @@
 #   fantasy status    show whether it is running
 #   fantasy logs      follow the server log
 #   fantasy fg        run in the foreground (Ctrl+C to stop)
+#   fantasy sync      sync finished rounds' stats and prices now (server running or not)
 set -euo pipefail
 
 DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
@@ -57,5 +58,13 @@ case "${1:-open}" in
   status) healthy && echo "Running on $URL" || echo "Not running" ;;
   logs) tail -n 50 -f "$LOG" ;;
   fg) cd "$DIR" && exec python3 "$DIR/server.py" ;;
-  *) sed -n '2,9p' "$0" | sed 's/^# \{0,1\}//'; exit 1 ;;
+  sync)
+    if healthy; then
+      curl -fsS -m 300 -X POST "$URL/api/sync"
+      echo
+    else
+      cd "$DIR" && exec python3 "$DIR/server.py" --sync
+    fi
+    ;;
+  *) sed -n '2,10p' "$0" | sed 's/^# \{0,1\}//'; exit 1 ;;
 esac

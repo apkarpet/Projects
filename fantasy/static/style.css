@@ -22,6 +22,9 @@
   --down: #d42a3a;
   --warn: #a35a00;
   --fav: rgba(255, 107, 26, 0.09);
+  --tip: rgba(255, 204, 0, 0.5);   /* highlighter for players the tip columns keep picking */
+  --tip-soft: rgba(255, 204, 0, 0.22);
+  --tip-ink: #6e4f00;
 
   --font: "Archivo", "Helvetica Neue", Arial, sans-serif;
   --serif: var(--font);
@@ -962,3 +965,37 @@ main { padding-top: 8px; }
 .live-chip.coach { cursor: default; }
 .pchip.blocked { opacity: 0.35; cursor: not-allowed; }
 .pchip.moved { box-shadow: 0 0 0 2px var(--orange); }
+
+/* ---------------------------------------------------------------- tips */
+
+.tipped {
+  background: linear-gradient(transparent 14%, var(--tip) 14%, var(--tip) 90%, transparent 90%);
+  border-radius: 2px;
+  padding: 0 3px;
+  -webkit-box-decoration-break: clone;
+  box-decoration-break: clone;
+}
+.pc-name.tipped { justify-self: start; max-width: 100%; }
+.tip-badge {
+  margin-left: 6px;
+  padding: 1px 6px;
+  font-size: 0.6875rem;
+  font-weight: 700;
+  color: var(--tip-ink);
+  background: var(--tip-soft);
+  border-radius: 999px;
+  white-space: nowrap;
+}
+.pd-chart .tip-h { margin-top: 18px; }
+.tips { margin: 6px 0 0; padding: 0; list-style: none; font-size: 0.8125rem; }
+.tips li { padding: 6px 0; border-top: 1px solid var(--rule); }
+.tips li:first-child { border-top: 0; }
+.tips a { font-weight: 600; text-decoration: none; }
+.tips a:hover { color: var(--accent); text-decoration: underline; }
+.tips q { display: block; margin-top: 3px; color: var(--ink-2); font-style: italic; }
+.tips .tip-warn .muted { color: var(--warn); }
+.tips-t td.l a { text-decoration: none; color: var(--ink-2); }
+.tips-t td.l a:hover { color: var(--accent); text-decoration: underline; }
+@media (max-width: 700px) {
+  .tips-t .tip-latest { display: none; }
+}
